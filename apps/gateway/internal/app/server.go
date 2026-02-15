@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +42,8 @@ const (
 	cronStatusRunning   = "running"
 	cronStatusSucceeded = "succeeded"
 	cronStatusFailed    = "failed"
+
+	cronLeaseDirName = "cron-leases"
 )
 
 var errCronJobNotFound = errors.New("cron_job_not_found")
@@ -51,11 +55,9 @@ type Server struct {
 	runner  *runner.Runner
 	console *channel.ConsoleChannel
 
-	cronStop  chan struct{}
-	cronDone  chan struct{}
-	cronWG    sync.WaitGroup
-	cronRunMu sync.Mutex
-	cronRuns  map[string]int
+	cronStop chan struct{}
+	cronDone chan struct{}
+	cronWG   sync.WaitGroup
 
 	cronTaskExecutor func(context.Context, domain.CronJobSpec) error
 	closeOnce        sync.Once
@@ -73,7 +75,6 @@ func NewServer(cfg config.Config) (*Server, error) {
 		console:  channel.NewConsoleChannel(),
 		cronStop: make(chan struct{}),
 		cronDone: make(chan struct{}),
-		cronRuns: map[string]int{},
 	}
 	srv.startCronScheduler()
 	return srv, nil
@@ -739,13 +740,17 @@ func (s *Server) executeCronJob(id string) error {
 	}
 
 	runtime := cronRuntimeSpec(job)
-	if !s.tryAcquireCronSlot(id, runtime.MaxConcurrency) {
+	slot, acquired, err := s.tryAcquireCronSlot(id, runtime)
+	if err != nil {
+		return err
+	}
+	if !acquired {
 		if err := s.markCronExecutionSkipped(id, fmt.Sprintf("max_concurrency limit reached (%d)", runtime.MaxConcurrency)); err != nil {
 			return err
 		}
 		return errCronMaxConcurrencyReached
 	}
-	defer s.releaseCronSlot(id)
+	defer s.releaseCronSlot(slot)
 
 	startedAt := nowISO()
 	running := cronStatusRunning
@@ -853,28 +858,151 @@ func cronJobSchedulable(job domain.CronJobSpec, state domain.CronJobState) bool 
 	return job.Enabled && !state.Paused
 }
 
-func (s *Server) tryAcquireCronSlot(jobID string, maxConcurrency int) bool {
+type cronLeaseSlot struct {
+	LeaseID string `json:"lease_id"`
+	JobID   string `json:"job_id"`
+	Owner   string `json:"owner"`
+	Slot    int    `json:"slot"`
+
+	AcquiredAt string `json:"acquired_at"`
+	ExpiresAt  string `json:"expires_at"`
+}
+
+type cronLeaseHandle struct {
+	Path    string
+	LeaseID string
+}
+
+func (s *Server) tryAcquireCronSlot(jobID string, runtime domain.CronRuntimeSpec) (*cronLeaseHandle, bool, error) {
+	maxConcurrency := runtime.MaxConcurrency
 	if maxConcurrency <= 0 {
 		maxConcurrency = 1
 	}
-	s.cronRunMu.Lock()
-	defer s.cronRunMu.Unlock()
-	if s.cronRuns[jobID] >= maxConcurrency {
-		return false
+
+	now := time.Now().UTC()
+	ttl := time.Duration(runtime.TimeoutSeconds)*time.Second + 30*time.Second
+	if ttl < 30*time.Second {
+		ttl = 30 * time.Second
 	}
-	s.cronRuns[jobID]++
-	return true
+
+	leaseID := newCronLeaseID()
+	dir := filepath.Join(s.cfg.DataDir, cronLeaseDirName, encodeCronJobID(jobID))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, false, err
+	}
+
+	for slot := 0; slot < maxConcurrency; slot++ {
+		path := filepath.Join(dir, fmt.Sprintf("slot-%d.json", slot))
+		if err := cleanupExpiredCronLease(path, now); err != nil {
+			return nil, false, err
+		}
+
+		lease := cronLeaseSlot{
+			LeaseID:    leaseID,
+			JobID:      jobID,
+			Owner:      fmt.Sprintf("pid:%d", os.Getpid()),
+			Slot:       slot,
+			AcquiredAt: now.Format(time.RFC3339Nano),
+			ExpiresAt:  now.Add(ttl).Format(time.RFC3339Nano),
+		}
+		body, err := json.Marshal(lease)
+		if err != nil {
+			return nil, false, err
+		}
+
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return nil, false, err
+		}
+
+		if _, err := f.Write(body); err != nil {
+			_ = f.Close()
+			_ = removeIfExists(path)
+			return nil, false, err
+		}
+		if err := f.Close(); err != nil {
+			_ = removeIfExists(path)
+			return nil, false, err
+		}
+		return &cronLeaseHandle{Path: path, LeaseID: leaseID}, true, nil
+	}
+	return nil, false, nil
 }
 
-func (s *Server) releaseCronSlot(jobID string) {
-	s.cronRunMu.Lock()
-	defer s.cronRunMu.Unlock()
-	n := s.cronRuns[jobID] - 1
-	if n <= 0 {
-		delete(s.cronRuns, jobID)
+func (s *Server) releaseCronSlot(slot *cronLeaseHandle) {
+	if slot == nil || strings.TrimSpace(slot.Path) == "" {
 		return
 	}
-	s.cronRuns[jobID] = n
+
+	body, err := os.ReadFile(slot.Path)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		log.Printf("release cron lease read failed: path=%s err=%v", slot.Path, err)
+		return
+	}
+
+	var lease cronLeaseSlot
+	if err := json.Unmarshal(body, &lease); err != nil {
+		if rmErr := removeIfExists(slot.Path); rmErr != nil {
+			log.Printf("release cron lease cleanup failed: path=%s err=%v", slot.Path, rmErr)
+		}
+		return
+	}
+	if lease.LeaseID != slot.LeaseID {
+		return
+	}
+	if err := os.Remove(slot.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("release cron lease failed: path=%s err=%v", slot.Path, err)
+	}
+}
+
+func cleanupExpiredCronLease(path string, now time.Time) error {
+	body, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	var lease cronLeaseSlot
+	if err := json.Unmarshal(body, &lease); err != nil {
+		return removeIfExists(path)
+	}
+
+	expiresAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(lease.ExpiresAt))
+	if err != nil {
+		return removeIfExists(path)
+	}
+	if !now.After(expiresAt.UTC()) {
+		return nil
+	}
+	return removeIfExists(path)
+}
+
+func removeIfExists(path string) error {
+	err := os.Remove(path)
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func encodeCronJobID(jobID string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(jobID))
+}
+
+func newCronLeaseID() string {
+	buf := make([]byte, 6)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%d-%x", os.Getpid(), buf)
 }
 
 func (s *Server) markCronExecutionSkipped(id, message string) error {

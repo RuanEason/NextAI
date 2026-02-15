@@ -28,7 +28,12 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	srv, err := NewServer(config.Config{Host: "127.0.0.1", Port: "0", DataDir: dir})
+	return newTestServerWithDataDir(t, dir)
+}
+
+func newTestServerWithDataDir(t *testing.T, dataDir string) *Server {
+	t.Helper()
+	srv, err := NewServer(config.Config{Host: "127.0.0.1", Port: "0", DataDir: dataDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,6 +408,74 @@ func TestExecuteCronJobRespectsMaxConcurrency(t *testing.T) {
 	}
 }
 
+func TestExecuteCronJobRespectsMaxConcurrencyAcrossServers(t *testing.T) {
+	dir, err := os.MkdirTemp("", "copaw-next-gateway-distributed-lock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	store, err := repo.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Write(func(st *repo.State) error {
+		st.CronJobs["job-distributed-lock"] = domain.CronJobSpec{
+			ID:       "job-distributed-lock",
+			Name:     "job-distributed-lock",
+			Enabled:  false,
+			TaskType: "text",
+			Schedule: domain.CronScheduleSpec{Type: "interval", Cron: "60s"},
+			Runtime: domain.CronRuntimeSpec{
+				MaxConcurrency: 1,
+				TimeoutSeconds: 5,
+			},
+		}
+		st.CronStates["job-distributed-lock"] = domain.CronJobState{}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv1 := newTestServerWithDataDir(t, dir)
+	srv2 := newTestServerWithDataDir(t, dir)
+
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	srv1.cronTaskExecutor = func(ctx context.Context, _ domain.CronJobSpec) error {
+		entered <- struct{}{}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-release:
+			return nil
+		}
+	}
+	srv2.cronTaskExecutor = func(context.Context, domain.CronJobSpec) error {
+		t.Fatal("second server should not execute task when max_concurrency is reached")
+		return nil
+	}
+
+	err1Ch := make(chan error, 1)
+	go func() {
+		err1Ch <- srv1.executeCronJob("job-distributed-lock")
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first server execution did not start in time")
+	}
+
+	if err := srv2.executeCronJob("job-distributed-lock"); !errors.Is(err, errCronMaxConcurrencyReached) {
+		t.Fatalf("expected max concurrency error from second server, got: %v", err)
+	}
+
+	close(release)
+	if err := <-err1Ch; err != nil {
+		t.Fatalf("first server execution failed: %v", err)
+	}
+}
+
 func TestExecuteCronJobRespectsTimeout(t *testing.T) {
 	srv := newTestServer(t)
 	if err := srv.store.Write(func(st *repo.State) error {
@@ -441,6 +514,50 @@ func TestExecuteCronJobRespectsTimeout(t *testing.T) {
 	}
 	if errMsg, _ := state["last_error"].(string); !strings.Contains(errMsg, "timeout") {
 		t.Fatalf("expected timeout error, got=%v", state["last_error"])
+	}
+}
+
+func TestResolveCronNextRunAtDSTSpringForward(t *testing.T) {
+	job := domain.CronJobSpec{
+		Schedule: domain.CronScheduleSpec{
+			Type:     "cron",
+			Cron:     "30 2 8 3 *",
+			Timezone: "America/New_York",
+		},
+	}
+	now := time.Date(2026, 2, 15, 0, 0, 0, 0, time.UTC)
+	next, dueAt, err := resolveCronNextRunAt(job, nil, now)
+	if err != nil {
+		t.Fatalf("resolve next run failed: %v", err)
+	}
+	if dueAt != nil {
+		t.Fatalf("expected dueAt=nil, got=%v", dueAt)
+	}
+	expected := time.Date(2027, 3, 8, 7, 30, 0, 0, time.UTC)
+	if !next.Equal(expected) {
+		t.Fatalf("unexpected next run at, expected=%s got=%s", expected.Format(time.RFC3339), next.Format(time.RFC3339))
+	}
+}
+
+func TestResolveCronNextRunAtDSTFallBack(t *testing.T) {
+	job := domain.CronJobSpec{
+		Schedule: domain.CronScheduleSpec{
+			Type:     "cron",
+			Cron:     "30 1 1 11 *",
+			Timezone: "America/New_York",
+		},
+	}
+	now := time.Date(2026, 2, 15, 0, 0, 0, 0, time.UTC)
+	next, dueAt, err := resolveCronNextRunAt(job, nil, now)
+	if err != nil {
+		t.Fatalf("resolve next run failed: %v", err)
+	}
+	if dueAt != nil {
+		t.Fatalf("expected dueAt=nil, got=%v", dueAt)
+	}
+	expected := time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC)
+	if !next.Equal(expected) {
+		t.Fatalf("unexpected next run at, expected=%s got=%s", expected.Format(time.RFC3339), next.Format(time.RFC3339))
 	}
 }
 
