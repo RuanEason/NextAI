@@ -1,3 +1,11 @@
-# Web
+# Web Chat Console
 
-此目录为 v1 控制台前端占位，后续将按 chat/models/envs/skills/workspace/cron 页面逐步补齐。
+Current scope:
+- Session list (`GET /chats`)
+- Chat history (`GET /chats/{chat_id}`)
+- Streaming send (`POST /agent/process` with SSE parsing)
+
+Build output:
+- `dist/index.html`
+- `dist/styles.css`
+- `dist/main.js`

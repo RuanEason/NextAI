@@ -7,11 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -27,11 +30,27 @@ import (
 
 const version = "0.1.0"
 
+const (
+	cronTickInterval = time.Second
+
+	cronStatusPaused    = "paused"
+	cronStatusResumed   = "resumed"
+	cronStatusRunning   = "running"
+	cronStatusSucceeded = "succeeded"
+	cronStatusFailed    = "failed"
+)
+
+var errCronJobNotFound = errors.New("cron_job_not_found")
+
 type Server struct {
 	cfg     config.Config
 	store   *repo.Store
 	runner  *runner.Runner
 	console *channel.ConsoleChannel
+
+	cronStop  chan struct{}
+	cronDone  chan struct{}
+	closeOnce sync.Once
 }
 
 func NewServer(cfg config.Config) (*Server, error) {
@@ -39,12 +58,23 @@ func NewServer(cfg config.Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{
-		cfg:     cfg,
-		store:   store,
-		runner:  runner.New(),
-		console: channel.NewConsoleChannel(),
-	}, nil
+	srv := &Server{
+		cfg:      cfg,
+		store:    store,
+		runner:   runner.New(),
+		console:  channel.NewConsoleChannel(),
+		cronStop: make(chan struct{}),
+		cronDone: make(chan struct{}),
+	}
+	srv.startCronScheduler()
+	return srv, nil
+}
+
+func (s *Server) Close() {
+	s.closeOnce.Do(func() {
+		close(s.cronStop)
+		<-s.cronDone
+	})
 }
 
 func (s *Server) Handler() http.Handler {
@@ -119,6 +149,86 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	return r
+}
+
+func (s *Server) startCronScheduler() {
+	go func() {
+		defer close(s.cronDone)
+		s.cronSchedulerTick()
+
+		ticker := time.NewTicker(cronTickInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				s.cronSchedulerTick()
+			case <-s.cronStop:
+				return
+			}
+		}
+	}()
+}
+
+func (s *Server) cronSchedulerTick() {
+	now := time.Now().UTC()
+	stateUpdates := map[string]domain.CronJobState{}
+	dueJobIDs := make([]string, 0)
+	s.store.Read(func(st *repo.State) {
+		for id, job := range st.CronJobs {
+			current := st.CronStates[id]
+			next := normalizeCronPausedState(current)
+			if !cronJobSchedulable(job, next) {
+				next.NextRunAt = nil
+				if !cronStateEqual(current, next) {
+					stateUpdates[id] = next
+				}
+				continue
+			}
+
+			interval, err := cronInterval(job)
+			if err != nil {
+				msg := err.Error()
+				next.LastError = &msg
+				next.NextRunAt = nil
+				if !cronStateEqual(current, next) {
+					stateUpdates[id] = next
+				}
+				continue
+			}
+
+			nextRunAt, due := resolveNextRunAt(next.NextRunAt, interval, now)
+			nextRun := nextRunAt.Format(time.RFC3339)
+			next.NextRunAt = &nextRun
+			next.LastError = nil
+			if !cronStateEqual(current, next) {
+				stateUpdates[id] = next
+			}
+			if due {
+				dueJobIDs = append(dueJobIDs, id)
+			}
+		}
+	})
+	if len(stateUpdates) > 0 {
+		if err := s.store.Write(func(st *repo.State) error {
+			for id, next := range stateUpdates {
+				if _, ok := st.CronJobs[id]; !ok {
+					continue
+				}
+				st.CronStates[id] = next
+			}
+			return nil
+		}); err != nil {
+			log.Printf("cron scheduler tick failed: %v", err)
+			return
+		}
+	}
+
+	for _, jobID := range dueJobIDs {
+		if err := s.executeCronJob(jobID); err != nil && !errors.Is(err, errCronJobNotFound) {
+			log.Printf("cron job %s execute failed: %v", jobID, err)
+		}
+	}
 }
 
 func cors(next http.Handler) http.Handler {
@@ -295,6 +405,8 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chatID := ""
+	activeLLM := domain.ModelSlotConfig{}
+	providerSetting := repo.ProviderSetting{}
 	if err := s.store.Write(func(state *repo.State) error {
 		for id, c := range state.Chats {
 			if c.SessionID == req.SessionID && c.UserID == req.UserID && c.Channel == req.Channel {
@@ -318,13 +430,25 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 				Content: toRuntimeContents(input.Content),
 			})
 		}
+		activeLLM = state.ActiveLLM
+		providerSetting = state.Providers[activeLLM.ProviderID]
 		return nil
 	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
 
-	reply := s.runner.GenerateReply(req)
+	reply, err := s.runner.GenerateReply(r.Context(), req, runner.GenerateConfig{
+		ProviderID: activeLLM.ProviderID,
+		Model:      activeLLM.Model,
+		APIKey:     resolveProviderAPIKey(activeLLM.ProviderID, providerSetting),
+		BaseURL:    resolveProviderBaseURL(activeLLM.ProviderID, providerSetting),
+	})
+	if err != nil {
+		status, code, message := mapRunnerError(err)
+		writeErr(w, status, code, message, nil)
+		return
+	}
 	assistant := domain.RuntimeMessage{
 		ID:      newID("msg"),
 		Role:    "assistant",
@@ -404,11 +528,11 @@ func (s *Server) createCronJob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_cron", "id and name are required", nil)
 		return
 	}
+	now := time.Now().UTC()
 	if err := s.store.Write(func(state *repo.State) error {
 		state.CronJobs[req.ID] = req
-		if _, ok := state.CronStates[req.ID]; !ok {
-			state.CronStates[req.ID] = domain.CronJobState{}
-		}
+		existing := state.CronStates[req.ID]
+		state.CronStates[req.ID] = alignCronStateForMutation(req, normalizeCronPausedState(existing), now)
 		return nil
 	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
@@ -446,11 +570,14 @@ func (s *Server) updateCronJob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "job_id_mismatch", "job_id mismatch", nil)
 		return
 	}
+	now := time.Now().UTC()
 	if err := s.store.Write(func(st *repo.State) error {
 		if _, ok := st.CronJobs[id]; !ok {
 			return errors.New("not_found")
 		}
 		st.CronJobs[id] = req
+		state := normalizeCronPausedState(st.CronStates[id])
+		st.CronStates[id] = alignCronStateForMutation(req, state, now)
 		return nil
 	}); err != nil {
 		if err.Error() == "not_found" {
@@ -481,29 +608,17 @@ func (s *Server) deleteCronJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) pauseCronJob(w http.ResponseWriter, r *http.Request) {
-	s.updateCronStatus(w, chi.URLParam(r, "job_id"), "paused")
+	s.updateCronStatus(w, chi.URLParam(r, "job_id"), cronStatusPaused)
 }
 
 func (s *Server) resumeCronJob(w http.ResponseWriter, r *http.Request) {
-	s.updateCronStatus(w, chi.URLParam(r, "job_id"), "resumed")
+	s.updateCronStatus(w, chi.URLParam(r, "job_id"), cronStatusResumed)
 }
 
 func (s *Server) runCronJob(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "job_id")
-	now := nowISO()
-	status := "running"
-	if err := s.store.Write(func(st *repo.State) error {
-		job, ok := st.CronJobs[id]
-		if !ok {
-			return errors.New("not_found")
-		}
-		st.CronStates[id] = domain.CronJobState{LastRunAt: &now, LastStatus: &status}
-		if job.TaskType == "text" && job.Text != "" {
-			s.console.SendText(job.Dispatch.Target.UserID, job.Dispatch.Target.SessionID, job.Text)
-		}
-		return nil
-	}); err != nil {
-		if err.Error() == "not_found" {
+	if err := s.executeCronJob(id); err != nil {
+		if errors.Is(err, errCronJobNotFound) {
 			writeErr(w, http.StatusNotFound, "not_found", "cron job not found", nil)
 			return
 		}
@@ -531,11 +646,21 @@ func (s *Server) getCronJobState(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateCronStatus(w http.ResponseWriter, id, status string) {
+	now := time.Now().UTC()
 	if err := s.store.Write(func(st *repo.State) error {
-		if _, ok := st.CronJobs[id]; !ok {
+		job, ok := st.CronJobs[id]
+		if !ok {
 			return errors.New("not_found")
 		}
-		state := st.CronStates[id]
+		state := normalizeCronPausedState(st.CronStates[id])
+		switch status {
+		case cronStatusPaused:
+			state.Paused = true
+			state.NextRunAt = nil
+		case cronStatusResumed:
+			state.Paused = false
+			state = alignCronStateForMutation(job, state, now)
+		}
 		state.LastStatus = &status
 		st.CronStates[id] = state
 		return nil
@@ -548,24 +673,162 @@ func (s *Server) updateCronStatus(w http.ResponseWriter, id, status string) {
 		return
 	}
 	key := "paused"
-	if status == "resumed" {
+	if status == cronStatusResumed {
 		key = "resumed"
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{key: true})
+}
+
+func (s *Server) executeCronJob(id string) error {
+	var job domain.CronJobSpec
+	startedAt := nowISO()
+	running := cronStatusRunning
+
+	if err := s.store.Write(func(st *repo.State) error {
+		target, ok := st.CronJobs[id]
+		if !ok {
+			return errCronJobNotFound
+		}
+		job = target
+		state := normalizeCronPausedState(st.CronStates[id])
+		state.LastRunAt = &startedAt
+		state.LastStatus = &running
+		state.LastError = nil
+		st.CronStates[id] = state
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	execErr := s.executeCronTask(job)
+	finalStatus := cronStatusSucceeded
+	var finalErr *string
+	if execErr != nil {
+		finalStatus = cronStatusFailed
+		msg := execErr.Error()
+		finalErr = &msg
+	}
+
+	return s.store.Write(func(st *repo.State) error {
+		if _, ok := st.CronJobs[id]; !ok {
+			return nil
+		}
+		state := st.CronStates[id]
+		state.LastStatus = &finalStatus
+		state.LastError = finalErr
+		st.CronStates[id] = state
+		return nil
+	})
+}
+
+func (s *Server) executeCronTask(job domain.CronJobSpec) error {
+	if job.TaskType == "text" && strings.TrimSpace(job.Text) != "" {
+		s.console.SendText(job.Dispatch.Target.UserID, job.Dispatch.Target.SessionID, job.Text)
+	}
+	return nil
+}
+
+func alignCronStateForMutation(job domain.CronJobSpec, state domain.CronJobState, now time.Time) domain.CronJobState {
+	if !cronJobSchedulable(job, state) {
+		state.NextRunAt = nil
+		return state
+	}
+	interval, err := cronInterval(job)
+	if err != nil {
+		msg := err.Error()
+		state.LastError = &msg
+		state.NextRunAt = nil
+		return state
+	}
+
+	nextRunAt := now.Add(interval).Format(time.RFC3339)
+	state.NextRunAt = &nextRunAt
+	state.LastError = nil
+	return state
+}
+
+func normalizeCronPausedState(state domain.CronJobState) domain.CronJobState {
+	if !state.Paused && state.LastStatus != nil && *state.LastStatus == cronStatusPaused {
+		state.Paused = true
+	}
+	return state
+}
+
+func cronStateEqual(a, b domain.CronJobState) bool {
+	return cronStringPtrEqual(a.NextRunAt, b.NextRunAt) &&
+		cronStringPtrEqual(a.LastRunAt, b.LastRunAt) &&
+		cronStringPtrEqual(a.LastStatus, b.LastStatus) &&
+		cronStringPtrEqual(a.LastError, b.LastError) &&
+		a.Paused == b.Paused
+}
+
+func cronStringPtrEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func cronJobSchedulable(job domain.CronJobSpec, state domain.CronJobState) bool {
+	return job.Enabled && !state.Paused
+}
+
+func cronInterval(job domain.CronJobSpec) (time.Duration, error) {
+	scheduleType := strings.ToLower(strings.TrimSpace(job.Schedule.Type))
+	if scheduleType != "" && scheduleType != "interval" {
+		return 0, fmt.Errorf("unsupported schedule.type=%q", job.Schedule.Type)
+	}
+
+	raw := strings.TrimSpace(job.Schedule.Cron)
+	if raw == "" {
+		return 0, errors.New("schedule.cron is required for interval jobs")
+	}
+	if secs, err := strconv.Atoi(raw); err == nil {
+		if secs <= 0 {
+			return 0, errors.New("schedule interval must be greater than 0")
+		}
+		return time.Duration(secs) * time.Second, nil
+	}
+
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("invalid schedule interval: %q", raw)
+	}
+	return parsed, nil
+}
+
+func resolveNextRunAt(current *string, interval time.Duration, now time.Time) (time.Time, bool) {
+	next := now.Add(interval)
+	if current == nil {
+		return next, false
+	}
+
+	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(*current))
+	if err != nil {
+		return next, false
+	}
+	if parsed.After(now) {
+		return parsed, false
+	}
+
+	for !parsed.After(now) {
+		parsed = parsed.Add(interval)
+	}
+	return parsed, true
 }
 
 func (s *Server) listProviders(w http.ResponseWriter, _ *http.Request) {
 	out := make([]domain.ProviderInfo, 0)
 	s.store.Read(func(st *repo.State) {
 		for id, setting := range st.Providers {
-			has := setting.APIKey != "" || setting.BaseURL != ""
+			has := strings.TrimSpace(resolveProviderAPIKey(id, setting)) != ""
 			out = append(out, domain.ProviderInfo{
 				ID: id, Name: strings.ToUpper(id), APIKeyPrefix: strings.ToUpper(id) + "_API_KEY",
-				Models:             []domain.ModelInfo{{ID: "demo-chat", Name: "Demo Chat"}},
-				AllowCustomBaseURL: true,
+				Models:             providerModels(id),
+				AllowCustomBaseURL: providerAllowCustomBaseURL(id),
 				HasAPIKey:          has,
-				CurrentAPIKey:      maskKey(setting.APIKey),
-				CurrentBaseURL:     setting.BaseURL,
+				CurrentAPIKey:      maskKey(resolveProviderAPIKey(id, setting)),
+				CurrentBaseURL:     resolveProviderBaseURL(id, setting),
 			})
 		}
 	})
@@ -593,11 +856,14 @@ func (s *Server) configureProvider(w http.ResponseWriter, r *http.Request) {
 			setting.BaseURL = *body.BaseURL
 		}
 		st.Providers[providerID] = setting
-		has := setting.APIKey != "" || setting.BaseURL != ""
+		has := strings.TrimSpace(resolveProviderAPIKey(providerID, setting)) != ""
 		out = domain.ProviderInfo{
 			ID: providerID, Name: strings.ToUpper(providerID), APIKeyPrefix: strings.ToUpper(providerID) + "_API_KEY",
-			Models:             []domain.ModelInfo{{ID: "demo-chat", Name: "Demo Chat"}},
-			AllowCustomBaseURL: true, HasAPIKey: has, CurrentAPIKey: maskKey(setting.APIKey), CurrentBaseURL: setting.BaseURL,
+			Models:             providerModels(providerID),
+			AllowCustomBaseURL: providerAllowCustomBaseURL(providerID),
+			HasAPIKey:          has,
+			CurrentAPIKey:      maskKey(resolveProviderAPIKey(providerID, setting)),
+			CurrentBaseURL:     resolveProviderBaseURL(providerID, setting),
 		}
 		return nil
 	}); err != nil {
@@ -1055,6 +1321,81 @@ func (s *Server) putChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+func mapRunnerError(err error) (status int, code string, message string) {
+	var runnerErr *runner.RunnerError
+	if errors.As(err, &runnerErr) {
+		switch runnerErr.Code {
+		case runner.ErrorCodeProviderNotConfigured:
+			return http.StatusBadRequest, runnerErr.Code, runnerErr.Message
+		case runner.ErrorCodeProviderNotSupported:
+			return http.StatusBadRequest, runnerErr.Code, runnerErr.Message
+		case runner.ErrorCodeProviderRequestFailed:
+			return http.StatusBadGateway, runnerErr.Code, runnerErr.Message
+		case runner.ErrorCodeProviderInvalidReply:
+			return http.StatusBadGateway, runnerErr.Code, runnerErr.Message
+		default:
+			return http.StatusInternalServerError, "runner_error", "runner execution failed"
+		}
+	}
+	return http.StatusInternalServerError, "runner_error", "runner execution failed"
+}
+
+func providerModels(providerID string) []domain.ModelInfo {
+	switch strings.ToLower(strings.TrimSpace(providerID)) {
+	case runner.ProviderOpenAI:
+		return []domain.ModelInfo{
+			{ID: "gpt-4o-mini", Name: "GPT-4o Mini"},
+			{ID: "gpt-4.1-mini", Name: "GPT-4.1 Mini"},
+		}
+	default:
+		return []domain.ModelInfo{{ID: "demo-chat", Name: "Demo Chat"}}
+	}
+}
+
+func providerAllowCustomBaseURL(providerID string) bool {
+	switch strings.ToLower(strings.TrimSpace(providerID)) {
+	case runner.ProviderDemo:
+		return false
+	default:
+		return true
+	}
+}
+
+func providerDefaultBaseURL(providerID string) string {
+	switch strings.ToLower(strings.TrimSpace(providerID)) {
+	case runner.ProviderOpenAI:
+		return "https://api.openai.com/v1"
+	default:
+		return ""
+	}
+}
+
+func resolveProviderAPIKey(providerID string, setting repo.ProviderSetting) string {
+	if key := strings.TrimSpace(setting.APIKey); key != "" {
+		return key
+	}
+	return strings.TrimSpace(os.Getenv(providerEnvPrefix(providerID) + "_API_KEY"))
+}
+
+func resolveProviderBaseURL(providerID string, setting repo.ProviderSetting) string {
+	if baseURL := strings.TrimSpace(setting.BaseURL); baseURL != "" {
+		return baseURL
+	}
+	if envBaseURL := strings.TrimSpace(os.Getenv(providerEnvPrefix(providerID) + "_BASE_URL")); envBaseURL != "" {
+		return envBaseURL
+	}
+	return providerDefaultBaseURL(providerID)
+}
+
+func providerEnvPrefix(providerID string) string {
+	prefix := strings.ToUpper(strings.TrimSpace(providerID))
+	if prefix == "" {
+		return "PROVIDER"
+	}
+	replacer := strings.NewReplacer("-", "_", ".", "_", " ", "_")
+	return replacer.Replace(prefix)
 }
 
 func writeJSON(w http.ResponseWriter, code int, data interface{}) {

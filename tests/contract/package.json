@@ -6,7 +6,7 @@
   "scripts": {
     "test": "node --test *.test.mjs",
     "build": "node -e \"console.log('no build for contract tests')\"",
-    "lint": "node -e \"console.log('no lint for contract tests')\""
+    "lint": "node openapi.lint.mjs"
   },
   "dependencies": {
     "yaml": "^2.8.1"

@@ -24,6 +24,8 @@ jobs:
         run: pnpm install --recursive
       - name: Gateway tests
         run: cd apps/gateway && go test ./...
+      - name: Smoke e2e tests
+        run: cd tests/smoke && pnpm test
       - name: CLI tests
         run: cd apps/cli && pnpm test
       - name: Contract tests

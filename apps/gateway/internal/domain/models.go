@@ -96,6 +96,7 @@ type CronJobState struct {
 	LastRunAt  *string `json:"last_run_at,omitempty"`
 	LastStatus *string `json:"last_status,omitempty"`
 	LastError  *string `json:"last_error,omitempty"`
+	Paused     bool    `json:"paused,omitempty"`
 }
 
 type CronJobView struct {

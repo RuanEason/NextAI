@@ -1,0 +1,70 @@
+import { readFile } from "node:fs/promises";
+import process from "node:process";
+import { parse } from "yaml";
+
+const specPath = new URL("../../packages/contracts/openapi/openapi.yaml", import.meta.url);
+
+const raw = await readFile(specPath, "utf8");
+const spec = parse(raw);
+const failures = [];
+
+function expect(condition, message) {
+  if (!condition) {
+    failures.push(message);
+  }
+}
+
+function hasRequired(schema, key) {
+  return Array.isArray(schema?.required) && schema.required.includes(key);
+}
+
+const schemas = spec?.components?.schemas ?? {};
+const chatSpec = schemas.ChatSpec;
+const runtimeContent = schemas.RuntimeContent;
+const agentInputMessage = schemas.AgentInputMessage;
+const agentProcessRequest = schemas.AgentProcessRequest;
+const modelSlotConfig = schemas.ModelSlotConfig;
+
+expect(spec?.openapi === "3.0.3", "openapi 版本必须是 3.0.3");
+expect(typeof spec?.paths === "object", "paths 必须存在");
+
+expect(chatSpec?.properties?.created_at?.format === "date-time", "ChatSpec.created_at 必须声明 date-time format");
+expect(chatSpec?.properties?.updated_at?.format === "date-time", "ChatSpec.updated_at 必须声明 date-time format");
+expect(hasRequired(chatSpec, "session_id"), "ChatSpec.required 必须包含 session_id");
+expect(hasRequired(chatSpec, "user_id"), "ChatSpec.required 必须包含 user_id");
+expect(hasRequired(chatSpec, "channel"), "ChatSpec.required 必须包含 channel");
+
+expect(Array.isArray(runtimeContent?.properties?.type?.enum), "RuntimeContent.type 必须声明 enum");
+expect(runtimeContent?.properties?.type?.enum?.includes("text"), "RuntimeContent.type enum 必须包含 text");
+expect(hasRequired(runtimeContent, "type"), "RuntimeContent.required 必须包含 type");
+
+expect(Array.isArray(agentInputMessage?.properties?.role?.enum), "AgentInputMessage.role 必须声明 enum");
+expect(agentInputMessage?.properties?.role?.enum?.includes("user"), "AgentInputMessage.role enum 必须包含 user");
+expect(agentInputMessage?.properties?.role?.enum?.includes("assistant"), "AgentInputMessage.role enum 必须包含 assistant");
+expect(agentInputMessage?.properties?.type?.enum?.includes("message"), "AgentInputMessage.type enum 必须包含 message");
+expect(agentInputMessage?.properties?.content?.minItems === 1, "AgentInputMessage.content 必须设置 minItems=1");
+expect(hasRequired(agentInputMessage, "role"), "AgentInputMessage.required 必须包含 role");
+expect(hasRequired(agentInputMessage, "type"), "AgentInputMessage.required 必须包含 type");
+expect(hasRequired(agentInputMessage, "content"), "AgentInputMessage.required 必须包含 content");
+
+expect(agentProcessRequest?.properties?.input?.minItems === 1, "AgentProcessRequest.input 必须设置 minItems=1");
+expect(hasRequired(agentProcessRequest, "input"), "AgentProcessRequest.required 必须包含 input");
+expect(hasRequired(agentProcessRequest, "session_id"), "AgentProcessRequest.required 必须包含 session_id");
+expect(hasRequired(agentProcessRequest, "user_id"), "AgentProcessRequest.required 必须包含 user_id");
+expect(hasRequired(agentProcessRequest, "channel"), "AgentProcessRequest.required 必须包含 channel");
+expect(hasRequired(agentProcessRequest, "stream"), "AgentProcessRequest.required 必须包含 stream");
+
+expect(modelSlotConfig?.properties?.provider_id?.minLength === 1, "ModelSlotConfig.provider_id 必须设置 minLength=1");
+expect(modelSlotConfig?.properties?.model?.minLength === 1, "ModelSlotConfig.model 必须设置 minLength=1");
+expect(hasRequired(modelSlotConfig, "provider_id"), "ModelSlotConfig.required 必须包含 provider_id");
+expect(hasRequired(modelSlotConfig, "model"), "ModelSlotConfig.required 必须包含 model");
+
+if (failures.length > 0) {
+  console.error("OpenAPI lint failed:");
+  for (const failure of failures) {
+    console.error(`- ${failure}`);
+  }
+  process.exit(1);
+}
+
+console.log("OpenAPI lint passed");

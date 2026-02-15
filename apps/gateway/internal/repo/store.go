@@ -60,7 +60,8 @@ func defaultState(dataDir string) State {
 		CronJobs:   map[string]domain.CronJobSpec{},
 		CronStates: map[string]domain.CronJobState{},
 		Providers: map[string]ProviderSetting{
-			"demo": {APIKey: "", BaseURL: ""},
+			"demo":   {APIKey: "", BaseURL: ""},
+			"openai": {APIKey: "", BaseURL: ""},
 		},
 		ActiveLLM: domain.ModelSlotConfig{ProviderID: "demo", Model: "demo-chat"},
 		Envs:      map[string]string{},
@@ -100,6 +101,18 @@ func (s *Store) load() error {
 	}
 	if state.Providers == nil {
 		state.Providers = map[string]ProviderSetting{"demo": {}}
+	}
+	if _, ok := state.Providers["demo"]; !ok {
+		state.Providers["demo"] = ProviderSetting{}
+	}
+	if _, ok := state.Providers["openai"]; !ok {
+		state.Providers["openai"] = ProviderSetting{}
+	}
+	if state.ActiveLLM.ProviderID == "" {
+		state.ActiveLLM.ProviderID = "demo"
+	}
+	if state.ActiveLLM.Model == "" {
+		state.ActiveLLM.Model = "demo-chat"
 	}
 	if state.Envs == nil {
 		state.Envs = map[string]string{}

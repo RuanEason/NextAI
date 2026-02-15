@@ -1,3 +1,14 @@
 # Smoke Tests
 
-此目录预留 docker-compose 与端到端冒烟场景。
+真实 e2e 场景：
+- 启动 Gateway（临时端口 + 临时数据目录）
+- 创建 chat
+- 调用 `/agent/process`（`stream: true`）并解析 SSE
+- 校验 `/chats` 与 `/chats/{chat_id}` 历史闭环
+
+运行：
+
+```bash
+cd tests/smoke
+pnpm test
+```

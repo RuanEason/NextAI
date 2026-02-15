@@ -28,8 +28,8 @@
 - [x] 统一错误模型：`{ error: { code, message, details } }`。
 - [x] 请求日志与 `X-Request-Id` 中间件。
 - [x] 工作区上传 zip 路径穿越拦截。
-- [ ] 实现真实 LLM provider 适配（当前为 demo echo）。
-- [ ] 实现真实 cron 调度器（当前为 API 驱动手动 run）。
+- [x] 实现真实 LLM provider 适配（支持 OpenAI，默认 demo 兜底）。
+- [x] 实现真实 cron 调度器（常驻调度 + 重启恢复，interval 模式）。
 - [ ] 实现多渠道插件（当前仅 console 可用）。
 - [ ] 增加鉴权中间件（当前默认本地无鉴权）。
 
@@ -46,8 +46,8 @@
 - [x] 建立 `packages/contracts/openapi/openapi.yaml`。
 - [x] 建立契约测试（路径覆盖检查）。
 - [x] 建立最小 TS/JSONSchema 占位定义。
-- [ ] 为关键请求/响应补全 schema 细节（字段级 required/enum/format）。
-- [ ] 增加 OpenAPI lint（spectral 或等价工具）。
+- [x] 为关键请求/响应补全 schema 细节（字段级 required/enum/format）。
+- [x] 增加 OpenAPI lint（等价 lint 工具已接入 `tests/contract/openapi.lint.mjs`）。
 - [ ] 增加基于 OpenAPI 的 SDK 自动生成流程。
 
 ## 5. 测试与质量
@@ -70,7 +70,7 @@
 
 ## 7. Web（控制台）
 - [x] 建立 `apps/web` 占位工程。
-- [ ] 实现 Chat 页面（会话列表 + 消息区 + 发送 + SSE 展示）。
+- [x] 实现 Chat 页面（会话列表 + 消息区 + 发送 + SSE 展示）。
 - [ ] 实现 Models/Envs/Skills/Workspace/Cron 页面最小操作面板。
 - [ ] 增加前端 API 错误处理与提示规范。
 - [ ] 增加前端测试（单测 + 冒烟）。

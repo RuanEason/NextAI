@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CoPaw Next Chat Console</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-a"></div>
+    <div class="ambient ambient-b"></div>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="title-block">
+          <p class="kicker">CoPaw Next</p>
+          <h1>Chat Console</h1>
+        </div>
+        <div class="controls">
+          <label>
+            API Base
+            <input id="api-base" type="url" placeholder="http://127.0.0.1:8088" />
+          </label>
+          <label>
+            User ID
+            <input id="user-id" type="text" placeholder="demo-user" />
+          </label>
+          <label>
+            Channel
+            <input id="channel" type="text" placeholder="console" />
+          </label>
+          <button id="reload-chats" type="button">Reload Chats</button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="sidebar panel">
+          <div class="panel-head">
+            <h2>Sessions</h2>
+            <button id="new-chat" type="button">New Session</button>
+          </div>
+          <ul id="chat-list" class="chat-list"></ul>
+        </aside>
+
+        <section class="chat panel">
+          <div class="panel-head chat-head">
+            <h2 id="chat-title">Draft Session</h2>
+            <span id="chat-session" class="session-badge"></span>
+          </div>
+
+          <ul id="message-list" class="messages"></ul>
+
+          <form id="composer" class="composer">
+            <textarea
+              id="message-input"
+              rows="3"
+              placeholder="Type a message and stream reply from /agent/process"
+            ></textarea>
+            <div class="composer-actions">
+              <span id="status-line" class="status-line">Ready</span>
+              <button id="send-btn" type="submit">Send (SSE)</button>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
