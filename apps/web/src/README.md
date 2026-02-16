@@ -13,7 +13,7 @@ Current scope:
   - Env list (`GET /envs`)
   - Replace env map by JSON (`PUT /envs`)
   - Delete single env (`DELETE /envs/{key}`)
-- Workspace tab
+- Config tab
   - File list (`GET /workspace/files`)
   - File read/edit/save/delete (`GET/PUT/DELETE /workspace/files/{file_path}`)
   - JSON export/import (`GET /workspace/export`, `POST /workspace/import`)
