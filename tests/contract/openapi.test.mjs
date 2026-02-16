@@ -17,7 +17,10 @@ const requiredPaths = [
   "/models/{provider_id}",
   "/envs",
   "/skills",
-  "/workspace/upload",
+  "/workspace/files",
+  "/workspace/files/{file_path}",
+  "/workspace/export",
+  "/workspace/import",
   "/config/channels",
 ];
 

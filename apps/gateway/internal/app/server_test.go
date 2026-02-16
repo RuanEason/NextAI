@@ -1,13 +1,9 @@
 package app
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -194,33 +190,125 @@ func TestProcessAgentDispatchesToWebhookChannel(t *testing.T) {
 	}
 }
 
-func TestWorkspaceUploadRejectUnsafePath(t *testing.T) {
+func TestWorkspaceFilesListIncludesConfigAndSkillFiles(t *testing.T) {
 	srv := newTestServer(t)
 
-	buf := &bytes.Buffer{}
-	zw := zip.NewWriter(buf)
-	f, err := zw.Create("../evil.txt")
-	if err != nil {
-		t.Fatal(err)
+	createSkill := `{"name":"demo-skill","content":"## skill content"}`
+	createW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createW, httptest.NewRequest(http.MethodPost, "/skills", strings.NewReader(createSkill)))
+	if createW.Code != http.StatusOK {
+		t.Fatalf("create skill status=%d body=%s", createW.Code, createW.Body.String())
 	}
-	_, _ = f.Write([]byte("x"))
-	_ = zw.Close()
 
-	body := &bytes.Buffer{}
-	mw := multipart.NewWriter(body)
-	part, err := mw.CreateFormFile("file", "workspace.zip")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _ = io.Copy(part, bytes.NewReader(buf.Bytes()))
-	_ = mw.Close()
-
-	req := httptest.NewRequest(http.MethodPost, "/workspace/upload", body)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
 	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d body=%s", w.Code, w.Body.String())
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/workspace/files", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list files status=%d body=%s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Files []struct {
+			Path string `json:"path"`
+			Kind string `json:"kind"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+
+	paths := map[string]string{}
+	for _, item := range body.Files {
+		paths[item.Path] = item.Kind
+	}
+	if got := paths["config/envs.json"]; got != "config" {
+		t.Fatalf("expected config/envs.json to be config, got=%q", got)
+	}
+	if got := paths["skills/demo-skill.json"]; got != "skill" {
+		t.Fatalf("expected skills/demo-skill.json to be skill, got=%q", got)
+	}
+}
+
+func TestWorkspaceFileConfigAndSkillCRUD(t *testing.T) {
+	srv := newTestServer(t)
+
+	envBody := `{"OPENAI_API_KEY":"sk-test"}`
+	putEnvsW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(putEnvsW, httptest.NewRequest(http.MethodPut, "/workspace/files/config/envs.json", strings.NewReader(envBody)))
+	if putEnvsW.Code != http.StatusOK {
+		t.Fatalf("put envs status=%d body=%s", putEnvsW.Code, putEnvsW.Body.String())
+	}
+
+	getEnvsW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(getEnvsW, httptest.NewRequest(http.MethodGet, "/workspace/files/config/envs.json", nil))
+	if getEnvsW.Code != http.StatusOK {
+		t.Fatalf("get envs status=%d body=%s", getEnvsW.Code, getEnvsW.Body.String())
+	}
+	if !strings.Contains(getEnvsW.Body.String(), "OPENAI_API_KEY") {
+		t.Fatalf("env file response should contain OPENAI_API_KEY: %s", getEnvsW.Body.String())
+	}
+
+	skillBody := `{"content":"## test skill","source":"customized","enabled":true}`
+	putSkillW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(putSkillW, httptest.NewRequest(http.MethodPut, "/workspace/files/skills/hello.json", strings.NewReader(skillBody)))
+	if putSkillW.Code != http.StatusOK {
+		t.Fatalf("put skill status=%d body=%s", putSkillW.Code, putSkillW.Body.String())
+	}
+
+	getSkillW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(getSkillW, httptest.NewRequest(http.MethodGet, "/workspace/files/skills/hello.json", nil))
+	if getSkillW.Code != http.StatusOK {
+		t.Fatalf("get skill status=%d body=%s", getSkillW.Code, getSkillW.Body.String())
+	}
+	if !strings.Contains(getSkillW.Body.String(), `"name":"hello"`) {
+		t.Fatalf("skill file should include normalized name: %s", getSkillW.Body.String())
+	}
+
+	delSkillW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(delSkillW, httptest.NewRequest(http.MethodDelete, "/workspace/files/skills/hello.json", nil))
+	if delSkillW.Code != http.StatusOK {
+		t.Fatalf("delete skill status=%d body=%s", delSkillW.Code, delSkillW.Body.String())
+	}
+
+	delConfigW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(delConfigW, httptest.NewRequest(http.MethodDelete, "/workspace/files/config/envs.json", nil))
+	if delConfigW.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("delete config status=%d body=%s", delConfigW.Code, delConfigW.Body.String())
+	}
+}
+
+func TestWorkspaceImportReplace(t *testing.T) {
+	srv := newTestServer(t)
+
+	importBody := `{
+		"mode":"replace",
+		"payload":{
+			"version":"v1",
+			"skills":{"imported":{"content":"# imported","source":"customized","enabled":true}},
+			"config":{
+				"envs":{"NEW_ENV":"ok"},
+				"channels":{"console":{"enabled":true},"webhook":{"enabled":false}},
+				"models":{
+					"providers":{"openai":{"api_key":"sk-imported","enabled":true,"headers":{},"model_aliases":{}}},
+					"active_llm":{"provider_id":"openai","model":"gpt-4o-mini"}
+				}
+			}
+		}
+	}`
+	importW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(importW, httptest.NewRequest(http.MethodPost, "/workspace/import", strings.NewReader(importBody)))
+	if importW.Code != http.StatusOK {
+		t.Fatalf("import status=%d body=%s", importW.Code, importW.Body.String())
+	}
+
+	exportW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(exportW, httptest.NewRequest(http.MethodGet, "/workspace/export", nil))
+	if exportW.Code != http.StatusOK {
+		t.Fatalf("export status=%d body=%s", exportW.Code, exportW.Body.String())
+	}
+	if !strings.Contains(exportW.Body.String(), `"NEW_ENV":"ok"`) {
+		t.Fatalf("export should contain imported env: %s", exportW.Body.String())
+	}
+	if !strings.Contains(exportW.Body.String(), `"name":"imported"`) {
+		t.Fatalf("export should contain imported skill: %s", exportW.Body.String())
 	}
 }
 

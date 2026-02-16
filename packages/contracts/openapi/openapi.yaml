@@ -332,12 +332,53 @@ paths:
           schema: { type: string }
       responses:
         '200': { description: ok }
-  /workspace/download:
+  /workspace/files:
     get:
       responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceFileListResponse' }
+  /workspace/files/{file_path}:
+    parameters:
+      - in: path
+        name: file_path
+        required: true
+        schema: { type: string }
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+    put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
         '200': { description: ok }
-  /workspace/upload:
+    delete:
+      responses:
+        '200': { description: ok }
+  /workspace/export:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceExportPayload' }
+  /workspace/import:
     post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WorkspaceImportRequest' }
       responses:
         '200': { description: ok }
   /config/channels:
@@ -600,3 +641,69 @@ components:
           additionalProperties: { type: string }
         active_llm: { $ref: '#/components/schemas/ActiveModelSlotConfig' }
       required: [providers, provider_types, defaults, active_llm]
+    WorkspaceFileEntry:
+      type: object
+      properties:
+        path: { type: string, minLength: 1 }
+        kind: { type: string, enum: [config, skill] }
+        size: { type: integer, minimum: 0 }
+      required: [path, kind, size]
+    WorkspaceFileListResponse:
+      type: object
+      properties:
+        files:
+          type: array
+          items: { $ref: '#/components/schemas/WorkspaceFileEntry' }
+      required: [files]
+    WorkspaceExportModels:
+      type: object
+      properties:
+        providers:
+          type: object
+          additionalProperties: { $ref: '#/components/schemas/ProviderConfigPatch' }
+        active_llm: { $ref: '#/components/schemas/ActiveModelSlotConfig' }
+      required: [providers, active_llm]
+    WorkspaceExportConfig:
+      type: object
+      properties:
+        envs:
+          type: object
+          additionalProperties: { type: string }
+        channels:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: true
+        models: { $ref: '#/components/schemas/WorkspaceExportModels' }
+      required: [envs, channels, models]
+    WorkspaceExportPayload:
+      type: object
+      properties:
+        version: { type: string, minLength: 1 }
+        skills:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/SkillSpec'
+        config: { $ref: '#/components/schemas/WorkspaceExportConfig' }
+      required: [version, skills, config]
+    WorkspaceImportRequest:
+      type: object
+      properties:
+        mode: { type: string, enum: [replace] }
+        payload: { $ref: '#/components/schemas/WorkspaceExportPayload' }
+      required: [mode, payload]
+    SkillSpec:
+      type: object
+      properties:
+        name: { type: string }
+        content: { type: string }
+        source: { type: string }
+        path: { type: string }
+        references:
+          type: object
+          additionalProperties: true
+        scripts:
+          type: object
+          additionalProperties: true
+        enabled: { type: boolean }
+      required: [name, content, source, path, references, scripts, enabled]

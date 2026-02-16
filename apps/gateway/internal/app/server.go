@@ -1,17 +1,15 @@
 package app
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -165,8 +163,12 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	r.Route("/workspace", func(r chi.Router) {
-		r.Get("/download", s.downloadWorkspace)
-		r.Post("/upload", s.uploadWorkspace)
+		r.Get("/files", s.listWorkspaceFiles)
+		r.Get("/files/*", s.getWorkspaceFile)
+		r.Put("/files/*", s.putWorkspaceFile)
+		r.Delete("/files/*", s.deleteWorkspaceFile)
+		r.Get("/export", s.exportWorkspace)
+		r.Post("/import", s.importWorkspace)
 	})
 
 	r.Route("/config", func(r chi.Router) {
@@ -1782,105 +1784,593 @@ func readSkillVirtualFile(skill domain.SkillSpec, filePath string) (string, bool
 	return s, ok
 }
 
-func (s *Server) downloadWorkspace(w http.ResponseWriter, _ *http.Request) {
-	buf := &bytes.Buffer{}
-	zw := zip.NewWriter(buf)
-	base := s.store.WorkspaceDir()
-	_ = filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if path == base {
-			return nil
-		}
-		rel, err := filepath.Rel(base, path)
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			_, err = zw.Create(strings.Trim(filepath.ToSlash(rel), "/") + "/")
-			return err
-		}
-		f, err := zw.Create(filepath.ToSlash(rel))
-		if err != nil {
-			return err
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		_, err = f.Write(data)
-		return err
-	})
-	_ = zw.Close()
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", "attachment; filename=workspace.zip")
-	_, _ = w.Write(buf.Bytes())
+const (
+	workspaceFileEnvs      = "config/envs.json"
+	workspaceFileChannels  = "config/channels.json"
+	workspaceFileModels    = "config/models.json"
+	workspaceFileActiveLLM = "config/active-llm.json"
+)
+
+type workspaceFileEntry struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
+	Size int    `json:"size"`
 }
 
-func (s *Server) uploadWorkspace(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(64 << 20); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_multipart", "invalid multipart form", nil)
+type workspaceFileListResponse struct {
+	Files []workspaceFileEntry `json:"files"`
+}
+
+type workspaceExportModels struct {
+	Providers map[string]repo.ProviderSetting `json:"providers"`
+	ActiveLLM domain.ModelSlotConfig          `json:"active_llm"`
+}
+
+type workspaceExportConfig struct {
+	Envs     map[string]string       `json:"envs"`
+	Channels domain.ChannelConfigMap `json:"channels"`
+	Models   workspaceExportModels   `json:"models"`
+}
+
+type workspaceExportPayload struct {
+	Version string                      `json:"version"`
+	Skills  map[string]domain.SkillSpec `json:"skills"`
+	Config  workspaceExportConfig       `json:"config"`
+}
+
+type workspaceImportRequest struct {
+	Mode    string                 `json:"mode"`
+	Payload workspaceExportPayload `json:"payload"`
+}
+
+func (s *Server) listWorkspaceFiles(w http.ResponseWriter, _ *http.Request) {
+	out := workspaceFileListResponse{Files: []workspaceFileEntry{}}
+	s.store.Read(func(st *repo.State) {
+		out.Files = collectWorkspaceFiles(st)
+	})
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) getWorkspaceFile(w http.ResponseWriter, r *http.Request) {
+	filePath, ok := workspaceFilePathFromRequest(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid_path", "invalid workspace file path", nil)
 		return
 	}
-	f, _, err := r.FormFile("file")
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "missing_file", "missing file field", nil)
+
+	var data interface{}
+	found := false
+	s.store.Read(func(st *repo.State) {
+		data, found = readWorkspaceFileData(st, filePath)
+	})
+	if !found {
+		writeErr(w, http.StatusNotFound, "not_found", "workspace file not found", nil)
 		return
 	}
-	defer f.Close()
-	data, err := io.ReadAll(f)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "read_file_error", err.Error(), nil)
+	writeJSON(w, http.StatusOK, data)
+}
+
+func (s *Server) putWorkspaceFile(w http.ResponseWriter, r *http.Request) {
+	filePath, ok := workspaceFilePathFromRequest(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid_path", "invalid workspace file path", nil)
 		return
 	}
-	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_zip", "uploaded file is not valid zip", nil)
-		return
-	}
-	for _, zf := range zr.File {
-		clean := filepath.Clean(zf.Name)
-		if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
-			writeErr(w, http.StatusBadRequest, "unsafe_zip_path", "zip contains unsafe path", map[string]string{"path": zf.Name})
+
+	switch filePath {
+	case workspaceFileEnvs:
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 			return
 		}
-	}
-	workspace := s.store.WorkspaceDir()
-	entries, _ := os.ReadDir(workspace)
-	for _, e := range entries {
-		_ = os.RemoveAll(filepath.Join(workspace, e.Name()))
-	}
-	for _, zf := range zr.File {
-		target := filepath.Join(workspace, filepath.Clean(zf.Name))
-		if zf.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				writeErr(w, http.StatusInternalServerError, "extract_error", err.Error(), nil)
+		envs, err := normalizeWorkspaceEnvs(body)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_env_key", err.Error(), nil)
+			return
+		}
+		if err := s.store.Write(func(st *repo.State) error {
+			st.Envs = envs
+			return nil
+		}); err != nil {
+			writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
+		return
+	case workspaceFileChannels:
+		var body domain.ChannelConfigMap
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
+			return
+		}
+		channels, err := normalizeWorkspaceChannels(body, s.channels)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "channel_not_supported", err.Error(), nil)
+			return
+		}
+		if err := s.store.Write(func(st *repo.State) error {
+			st.Channels = channels
+			return nil
+		}); err != nil {
+			writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
+		return
+	case workspaceFileModels:
+		var body map[string]repo.ProviderSetting
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
+			return
+		}
+		providers, err := normalizeWorkspaceProviders(body)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_provider_config", err.Error(), nil)
+			return
+		}
+		if err := s.store.Write(func(st *repo.State) error {
+			st.Providers = providers
+			if st.ActiveLLM.ProviderID != "" {
+				if _, ok := findProviderSettingByID(st, st.ActiveLLM.ProviderID); !ok {
+					st.ActiveLLM = domain.ModelSlotConfig{}
+				}
+			}
+			return nil
+		}); err != nil {
+			writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
+		return
+	case workspaceFileActiveLLM:
+		var body domain.ModelSlotConfig
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
+			return
+		}
+		body.ProviderID = normalizeProviderID(body.ProviderID)
+		body.Model = strings.TrimSpace(body.Model)
+		if (body.ProviderID == "") != (body.Model == "") {
+			writeErr(w, http.StatusBadRequest, "invalid_model_slot", "provider_id and model must be set together", nil)
+			return
+		}
+		if err := s.store.Write(func(st *repo.State) error {
+			if body.ProviderID == "" {
+				st.ActiveLLM = domain.ModelSlotConfig{}
+				return nil
+			}
+			if _, ok := findProviderSettingByID(st, body.ProviderID); !ok {
+				return errors.New("provider_not_found")
+			}
+			st.ActiveLLM = body
+			return nil
+		}); err != nil {
+			if err.Error() == "provider_not_found" {
+				writeErr(w, http.StatusNotFound, "provider_not_found", "provider not found", nil)
 				return
 			}
+			writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
+		return
+	}
+
+	name, ok := workspaceSkillNameFromPath(filePath)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid_path", "invalid workspace file path", nil)
+		return
+	}
+	var body domain.SkillSpec
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
+		return
+	}
+	if body.Name != "" && strings.TrimSpace(body.Name) != name {
+		writeErr(w, http.StatusBadRequest, "invalid_skill", "skill name in body must match file path", nil)
+		return
+	}
+	if strings.TrimSpace(body.Content) == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_skill", "content is required", nil)
+		return
+	}
+
+	source := strings.TrimSpace(body.Source)
+	if source == "" {
+		source = "customized"
+	}
+	spec := domain.SkillSpec{
+		Name:       name,
+		Content:    body.Content,
+		Source:     source,
+		Path:       filepath.Join(s.cfg.DataDir, "skills", name),
+		References: safeMap(body.References),
+		Scripts:    safeMap(body.Scripts),
+		Enabled:    body.Enabled,
+	}
+	if err := s.store.Write(func(st *repo.State) error {
+		st.Skills[name] = spec
+		return nil
+	}); err != nil {
+		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
+}
+
+func (s *Server) deleteWorkspaceFile(w http.ResponseWriter, r *http.Request) {
+	filePath, ok := workspaceFilePathFromRequest(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid_path", "invalid workspace file path", nil)
+		return
+	}
+	if isWorkspaceConfigFile(filePath) {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "config files cannot be deleted", nil)
+		return
+	}
+	name, ok := workspaceSkillNameFromPath(filePath)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid_path", "invalid workspace file path", nil)
+		return
+	}
+
+	deleted := false
+	if err := s.store.Write(func(st *repo.State) error {
+		if _, ok := st.Skills[name]; ok {
+			delete(st.Skills, name)
+			deleted = true
+		}
+		return nil
+	}); err != nil {
+		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"deleted": deleted})
+}
+
+func (s *Server) exportWorkspace(w http.ResponseWriter, _ *http.Request) {
+	out := workspaceExportPayload{
+		Version: "v1",
+		Skills:  map[string]domain.SkillSpec{},
+		Config: workspaceExportConfig{
+			Envs:     map[string]string{},
+			Channels: domain.ChannelConfigMap{},
+			Models: workspaceExportModels{
+				Providers: map[string]repo.ProviderSetting{},
+				ActiveLLM: domain.ModelSlotConfig{},
+			},
+		},
+	}
+	s.store.Read(func(st *repo.State) {
+		out.Skills = cloneWorkspaceSkills(st.Skills)
+		out.Config.Envs = cloneWorkspaceEnvs(st.Envs)
+		out.Config.Channels = cloneWorkspaceChannels(st.Channels)
+		out.Config.Models.Providers = cloneWorkspaceProviders(st.Providers)
+		out.Config.Models.ActiveLLM = st.ActiveLLM
+	})
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) importWorkspace(w http.ResponseWriter, r *http.Request) {
+	var body workspaceImportRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
+		return
+	}
+	if strings.ToLower(strings.TrimSpace(body.Mode)) != "replace" {
+		writeErr(w, http.StatusBadRequest, "invalid_import_mode", "mode must be replace", nil)
+		return
+	}
+
+	skills, err := normalizeWorkspaceSkills(body.Payload.Skills, s.cfg.DataDir)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_skill", err.Error(), nil)
+		return
+	}
+	envs, err := normalizeWorkspaceEnvs(body.Payload.Config.Envs)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_env_key", err.Error(), nil)
+		return
+	}
+	channels, err := normalizeWorkspaceChannels(body.Payload.Config.Channels, s.channels)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "channel_not_supported", err.Error(), nil)
+		return
+	}
+	providers, err := normalizeWorkspaceProviders(body.Payload.Config.Models.Providers)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_provider_config", err.Error(), nil)
+		return
+	}
+	active, err := normalizeWorkspaceActiveLLM(body.Payload.Config.Models.ActiveLLM, providers)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_model_slot", err.Error(), nil)
+		return
+	}
+
+	if err := s.store.Write(func(st *repo.State) error {
+		st.Skills = skills
+		st.Envs = envs
+		st.Channels = channels
+		st.Providers = providers
+		st.ActiveLLM = active
+		return nil
+	}); err != nil {
+		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"imported": true})
+}
+
+func collectWorkspaceFiles(st *repo.State) []workspaceFileEntry {
+	files := []workspaceFileEntry{
+		{Path: workspaceFileEnvs, Kind: "config", Size: jsonSize(cloneWorkspaceEnvs(st.Envs))},
+		{Path: workspaceFileChannels, Kind: "config", Size: jsonSize(cloneWorkspaceChannels(st.Channels))},
+		{Path: workspaceFileModels, Kind: "config", Size: jsonSize(cloneWorkspaceProviders(st.Providers))},
+		{Path: workspaceFileActiveLLM, Kind: "config", Size: jsonSize(st.ActiveLLM)},
+	}
+	for name, spec := range st.Skills {
+		files = append(files, workspaceFileEntry{
+			Path: workspaceSkillFilePath(name),
+			Kind: "skill",
+			Size: jsonSize(cloneWorkspaceSkill(spec)),
+		})
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return files
+}
+
+func readWorkspaceFileData(st *repo.State, filePath string) (interface{}, bool) {
+	switch filePath {
+	case workspaceFileEnvs:
+		return cloneWorkspaceEnvs(st.Envs), true
+	case workspaceFileChannels:
+		return cloneWorkspaceChannels(st.Channels), true
+	case workspaceFileModels:
+		return cloneWorkspaceProviders(st.Providers), true
+	case workspaceFileActiveLLM:
+		return st.ActiveLLM, true
+	default:
+		name, ok := workspaceSkillNameFromPath(filePath)
+		if !ok {
+			return nil, false
+		}
+		spec, exists := st.Skills[name]
+		if !exists {
+			return nil, false
+		}
+		return cloneWorkspaceSkill(spec), true
+	}
+}
+
+func workspaceFilePathFromRequest(r *http.Request) (string, bool) {
+	raw := chi.URLParam(r, "*")
+	if raw == "" {
+		raw = chi.URLParam(r, "file_path")
+	}
+	return normalizeWorkspaceFilePath(raw)
+}
+
+func normalizeWorkspaceFilePath(raw string) (string, bool) {
+	trimmed := strings.TrimSpace(strings.TrimPrefix(raw, "/"))
+	if trimmed == "" {
+		return "", false
+	}
+	if unescaped, err := url.PathUnescape(trimmed); err == nil {
+		trimmed = unescaped
+	}
+	trimmed = filepath.ToSlash(trimmed)
+	parts := strings.Split(trimmed, "/")
+	cleaned := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "." || part == ".." {
+			return "", false
+		}
+		cleaned = append(cleaned, part)
+	}
+	return strings.Join(cleaned, "/"), true
+}
+
+func workspaceSkillNameFromPath(filePath string) (string, bool) {
+	if !strings.HasPrefix(filePath, "skills/") || !strings.HasSuffix(filePath, ".json") {
+		return "", false
+	}
+	name := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(filePath, "skills/"), ".json"))
+	if name == "" || strings.Contains(name, "/") {
+		return "", false
+	}
+	return name, true
+}
+
+func workspaceSkillFilePath(name string) string {
+	return "skills/" + strings.TrimSpace(name) + ".json"
+}
+
+func isWorkspaceConfigFile(filePath string) bool {
+	return filePath == workspaceFileEnvs ||
+		filePath == workspaceFileChannels ||
+		filePath == workspaceFileModels ||
+		filePath == workspaceFileActiveLLM
+}
+
+func normalizeWorkspaceEnvs(in map[string]string) (map[string]string, error) {
+	out := map[string]string{}
+	for key, value := range in {
+		k := strings.TrimSpace(key)
+		if k == "" {
+			return nil, errors.New("env key cannot be empty")
+		}
+		out[k] = value
+	}
+	return out, nil
+}
+
+func normalizeWorkspaceChannels(in domain.ChannelConfigMap, supported map[string]plugin.ChannelPlugin) (domain.ChannelConfigMap, error) {
+	out := domain.ChannelConfigMap{}
+	for name, cfg := range in {
+		normalized := strings.ToLower(strings.TrimSpace(name))
+		if normalized == "" {
+			return nil, errors.New("channel name cannot be empty")
+		}
+		if _, ok := supported[normalized]; !ok {
+			return nil, fmt.Errorf("channel %q is not supported", name)
+		}
+		out[normalized] = cloneWorkspaceJSONMap(cfg)
+	}
+	return out, nil
+}
+
+func normalizeWorkspaceProviders(in map[string]repo.ProviderSetting) (map[string]repo.ProviderSetting, error) {
+	out := map[string]repo.ProviderSetting{}
+	for rawID, rawSetting := range in {
+		id := normalizeProviderID(rawID)
+		if id == "" {
+			return nil, errors.New("provider id cannot be empty")
+		}
+		if id == "demo" {
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			writeErr(w, http.StatusInternalServerError, "extract_error", err.Error(), nil)
-			return
+		setting := rawSetting
+		normalizeProviderSetting(&setting)
+		if setting.TimeoutMS < 0 {
+			return nil, fmt.Errorf("provider %q timeout_ms must be >= 0", rawID)
 		}
-		src, err := zf.Open()
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "extract_error", err.Error(), nil)
-			return
+		setting.Headers = sanitizeStringMap(setting.Headers)
+		setting.ModelAliases = sanitizeStringMap(setting.ModelAliases)
+		out[id] = setting
+	}
+	return out, nil
+}
+
+func normalizeWorkspaceSkills(in map[string]domain.SkillSpec, dataDir string) (map[string]domain.SkillSpec, error) {
+	out := map[string]domain.SkillSpec{}
+	for rawName, rawSpec := range in {
+		name := strings.TrimSpace(rawName)
+		if name == "" {
+			return nil, errors.New("skill name cannot be empty")
 		}
-		payload, err := io.ReadAll(src)
-		_ = src.Close()
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "extract_error", err.Error(), nil)
-			return
+		content := strings.TrimSpace(rawSpec.Content)
+		if content == "" {
+			return nil, fmt.Errorf("skill %q content is required", name)
 		}
-		if err := os.WriteFile(target, payload, 0o644); err != nil {
-			writeErr(w, http.StatusInternalServerError, "extract_error", err.Error(), nil)
-			return
+		source := strings.TrimSpace(rawSpec.Source)
+		if source == "" {
+			source = "customized"
+		}
+		out[name] = domain.SkillSpec{
+			Name:       name,
+			Content:    rawSpec.Content,
+			Source:     source,
+			Path:       filepath.Join(dataDir, "skills", name),
+			References: safeMap(rawSpec.References),
+			Scripts:    safeMap(rawSpec.Scripts),
+			Enabled:    rawSpec.Enabled,
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+	return out, nil
+}
+
+func normalizeWorkspaceActiveLLM(in domain.ModelSlotConfig, providers map[string]repo.ProviderSetting) (domain.ModelSlotConfig, error) {
+	providerID := normalizeProviderID(in.ProviderID)
+	modelID := strings.TrimSpace(in.Model)
+	if providerID == "" && modelID == "" {
+		return domain.ModelSlotConfig{}, nil
+	}
+	if providerID == "" || modelID == "" {
+		return domain.ModelSlotConfig{}, errors.New("provider_id and model must be set together")
+	}
+	if _, ok := providers[providerID]; !ok {
+		return domain.ModelSlotConfig{}, errors.New("active_llm provider not found")
+	}
+	return domain.ModelSlotConfig{ProviderID: providerID, Model: modelID}, nil
+}
+
+func cloneWorkspaceEnvs(in map[string]string) map[string]string {
+	out := map[string]string{}
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneWorkspaceChannels(in domain.ChannelConfigMap) domain.ChannelConfigMap {
+	out := domain.ChannelConfigMap{}
+	for name, cfg := range in {
+		out[name] = cloneWorkspaceJSONMap(cfg)
+	}
+	return out
+}
+
+func cloneWorkspaceProviders(in map[string]repo.ProviderSetting) map[string]repo.ProviderSetting {
+	out := map[string]repo.ProviderSetting{}
+	for id, raw := range in {
+		setting := raw
+		normalizeProviderSetting(&setting)
+		headers := map[string]string{}
+		for key, value := range setting.Headers {
+			headers[key] = value
+		}
+		aliases := map[string]string{}
+		for key, value := range setting.ModelAliases {
+			aliases[key] = value
+		}
+		setting.Headers = headers
+		setting.ModelAliases = aliases
+		if setting.Enabled != nil {
+			enabled := *setting.Enabled
+			setting.Enabled = &enabled
+		}
+		out[id] = setting
+	}
+	return out
+}
+
+func cloneWorkspaceSkills(in map[string]domain.SkillSpec) map[string]domain.SkillSpec {
+	out := map[string]domain.SkillSpec{}
+	for name, spec := range in {
+		out[name] = cloneWorkspaceSkill(spec)
+	}
+	return out
+}
+
+func cloneWorkspaceSkill(in domain.SkillSpec) domain.SkillSpec {
+	return domain.SkillSpec{
+		Name:       in.Name,
+		Content:    in.Content,
+		Source:     in.Source,
+		Path:       in.Path,
+		References: cloneWorkspaceJSONMap(in.References),
+		Scripts:    cloneWorkspaceJSONMap(in.Scripts),
+		Enabled:    in.Enabled,
+	}
+}
+
+func cloneWorkspaceJSONMap(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return map[string]interface{}{}
+	}
+	buf, err := json.Marshal(in)
+	if err != nil {
+		return map[string]interface{}{}
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(buf, &out); err != nil {
+		return map[string]interface{}{}
+	}
+	if out == nil {
+		return map[string]interface{}{}
+	}
+	return out
+}
+
+func jsonSize(v interface{}) int {
+	buf, err := json.Marshal(v)
+	if err != nil {
+		return 0
+	}
+	return len(buf)
 }
 
 func (s *Server) listChannels(w http.ResponseWriter, _ *http.Request) {

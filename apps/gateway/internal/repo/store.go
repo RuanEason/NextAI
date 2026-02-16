@@ -34,24 +34,18 @@ type State struct {
 }
 
 type Store struct {
-	mu           sync.RWMutex
-	state        State
-	stateFile    string
-	workspaceDir string
+	mu        sync.RWMutex
+	state     State
+	stateFile string
 }
 
 func NewStore(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, err
 	}
-	workspace := filepath.Join(dataDir, "workspace")
-	if err := os.MkdirAll(workspace, 0o755); err != nil {
-		return nil, err
-	}
 	s := &Store{
-		stateFile:    filepath.Join(dataDir, "state.json"),
-		workspaceDir: workspace,
-		state:        defaultState(dataDir),
+		stateFile: filepath.Join(dataDir, "state.json"),
+		state:     defaultState(dataDir),
 	}
 	if err := s.load(); err != nil {
 		return nil, err
@@ -182,10 +176,6 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 	return os.WriteFile(s.stateFile, b, 0o644)
-}
-
-func (s *Store) WorkspaceDir() string {
-	return s.workspaceDir
 }
 
 func (s *Store) Read(fn func(state *State)) {
