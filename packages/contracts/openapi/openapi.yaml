@@ -77,7 +77,11 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/AgentProcessRequest' }
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentProcessResponse' }
   /cron/jobs:
     get:
       responses:
@@ -443,6 +447,9 @@ components:
           type: array
           minItems: 1
           items: { $ref: '#/components/schemas/RuntimeContent' }
+        metadata:
+          type: object
+          additionalProperties: true
       required: [role, type, content]
     AgentProcessRequest:
       type: object
@@ -457,8 +464,58 @@ components:
         stream: { type: boolean }
         biz_params:
           type: object
+          description: Business extension params. Tool calls are sent via biz_params.tool.
           additionalProperties: true
+          properties:
+            tool:
+              $ref: '#/components/schemas/AgentToolCall'
       required: [input, session_id, user_id, channel, stream]
+    AgentToolCall:
+      type: object
+      properties:
+        name:
+          type: string
+          enum: [shell]
+        input:
+          type: object
+          additionalProperties: true
+      required: [name, input]
+    AgentToolCallPayload:
+      type: object
+      properties:
+        name: { type: string }
+        input:
+          type: object
+          additionalProperties: true
+      required: [name]
+    AgentToolResultPayload:
+      type: object
+      properties:
+        name: { type: string }
+        ok: { type: boolean }
+        summary: { type: string }
+      required: [name, ok]
+    AgentEvent:
+      type: object
+      properties:
+        type: { type: string }
+        step: { type: integer, minimum: 1 }
+        delta: { type: string }
+        reply: { type: string }
+        tool_call: { $ref: '#/components/schemas/AgentToolCallPayload' }
+        tool_result: { $ref: '#/components/schemas/AgentToolResultPayload' }
+        meta:
+          type: object
+          additionalProperties: true
+      required: [type]
+    AgentProcessResponse:
+      type: object
+      properties:
+        reply: { type: string }
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/AgentEvent' }
+      required: [reply]
     CronJobSpec:
       type: object
       properties:

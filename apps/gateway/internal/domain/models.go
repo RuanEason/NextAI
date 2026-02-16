@@ -39,9 +39,10 @@ type ChatHistory struct {
 }
 
 type AgentInputMessage struct {
-	Role    string           `json:"role"`
-	Type    string           `json:"type"`
-	Content []RuntimeContent `json:"content"`
+	Role     string                 `json:"role"`
+	Type     string                 `json:"type"`
+	Content  []RuntimeContent       `json:"content"`
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
 type AgentProcessRequest struct {
@@ -51,6 +52,32 @@ type AgentProcessRequest struct {
 	Channel   string                 `json:"channel"`
 	Stream    bool                   `json:"stream"`
 	BizParams map[string]interface{} `json:"biz_params,omitempty"`
+}
+
+type AgentToolCallPayload struct {
+	Name  string                 `json:"name"`
+	Input map[string]interface{} `json:"input,omitempty"`
+}
+
+type AgentToolResultPayload struct {
+	Name    string `json:"name"`
+	OK      bool   `json:"ok"`
+	Summary string `json:"summary,omitempty"`
+}
+
+type AgentEvent struct {
+	Type       string                  `json:"type"`
+	Step       int                     `json:"step,omitempty"`
+	Delta      string                  `json:"delta,omitempty"`
+	Reply      string                  `json:"reply,omitempty"`
+	ToolCall   *AgentToolCallPayload   `json:"tool_call,omitempty"`
+	ToolResult *AgentToolResultPayload `json:"tool_result,omitempty"`
+	Meta       map[string]interface{}  `json:"meta,omitempty"`
+}
+
+type AgentProcessResponse struct {
+	Reply  string       `json:"reply"`
+	Events []AgentEvent `json:"events,omitempty"`
 }
 
 type CronScheduleSpec struct {

@@ -358,6 +358,35 @@ button:disabled {
   gap: 10px;
 }
 
+.agent-events-panel {
+  border-top: 1px dashed rgba(28, 26, 23, 0.2);
+  padding: 10px 14px 0;
+}
+
+.agent-events-panel h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--ink-subtle);
+}
+
+.agent-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.agent-event-item {
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px dashed rgba(28, 26, 23, 0.2);
+  background: rgba(255, 255, 255, 0.56);
+  margin-bottom: 6px;
+}
+
 .message {
   max-width: 86%;
   padding: 11px 13px;

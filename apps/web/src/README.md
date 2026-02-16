@@ -5,6 +5,7 @@ Current scope:
   - Session list (`GET /chats`)
   - Chat history (`GET /chats/{chat_id}`)
   - Streaming send (`POST /agent/process` with SSE parsing)
+  - Agent event timeline (`step_started/tool_call/tool_result/completed`)
 - Models tab
   - Providers catalog (`GET /models/catalog`, fallback to `GET /models`)
   - Active model view (`GET /models/active`)

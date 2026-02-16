@@ -163,6 +163,32 @@ interface ViewMessage {
   text: string;
 }
 
+interface AgentToolCallPayload {
+  name?: string;
+  input?: Record<string, unknown>;
+}
+
+interface AgentToolResultPayload {
+  name?: string;
+  ok?: boolean;
+  summary?: string;
+}
+
+interface AgentStreamEvent {
+  type?: string;
+  step?: number;
+  delta?: string;
+  reply?: string;
+  tool_call?: AgentToolCallPayload;
+  tool_result?: AgentToolResultPayload;
+  meta?: Record<string, unknown>;
+}
+
+interface ViewAgentEvent {
+  id: string;
+  text: string;
+}
+
 interface JSONRequestOptions {
   method?: HttpMethod;
   body?: unknown;
@@ -201,6 +227,7 @@ const chatList = mustElement<HTMLUListElement>("chat-list");
 const chatTitle = mustElement<HTMLElement>("chat-title");
 const chatSession = mustElement<HTMLElement>("chat-session");
 const messageList = mustElement<HTMLUListElement>("message-list");
+const agentEventList = mustElement<HTMLUListElement>("agent-event-list");
 const composerForm = mustElement<HTMLFormElement>("composer");
 const messageInput = mustElement<HTMLTextAreaElement>("message-input");
 const sendButton = mustElement<HTMLButtonElement>("send-btn");
@@ -292,6 +319,7 @@ const state = {
   activeChatId: null as string | null,
   activeSessionId: newSessionID(),
   messages: [] as ViewMessage[],
+  agentEvents: [] as ViewAgentEvent[],
   sending: false,
 
   providers: [] as ProviderInfo[],
@@ -323,6 +351,7 @@ async function bootstrap(): Promise<void> {
   renderChatHeader();
   renderChatList();
   renderMessages();
+  renderAgentEvents();
   renderWorkspaceFiles();
   renderWorkspaceEditor();
   syncCronDispatchHint();
@@ -857,9 +886,11 @@ function startDraftSession(): void {
   state.activeChatId = null;
   state.activeSessionId = newSessionID();
   state.messages = [];
+  state.agentEvents = [];
   renderChatHeader();
   renderChatList();
   renderMessages();
+  renderAgentEvents();
 }
 
 async function sendMessage(): Promise<void> {
@@ -890,6 +921,8 @@ async function sendMessage(): Promise<void> {
   state.sending = true;
   sendButton.disabled = true;
   const assistantID = `assistant-${Date.now()}`;
+  state.agentEvents = [];
+  renderAgentEvents();
 
   state.messages = state.messages.concat(
     {
@@ -908,14 +941,21 @@ async function sendMessage(): Promise<void> {
   setStatus(t("status.streamingReply"), "info");
 
   try {
-    await streamReply(inputText, bizParams, (delta) => {
-      const target = state.messages.find((item) => item.id === assistantID);
-      if (!target) {
-        return;
-      }
-      target.text += delta;
-      renderMessages();
-    });
+    await streamReply(
+      inputText,
+      bizParams,
+      (delta) => {
+        const target = state.messages.find((item) => item.id === assistantID);
+        if (!target) {
+          return;
+        }
+        target.text += delta;
+        renderMessages();
+      },
+      (event) => {
+        pushAgentEvent(event);
+      },
+    );
     setStatus(t("status.replyCompleted"), "info");
 
     await reloadChats();
@@ -940,6 +980,7 @@ async function streamReply(
   userText: string,
   bizParams: Record<string, unknown> | undefined,
   onDelta: (delta: string) => void,
+  onEvent?: (event: AgentStreamEvent) => void,
 ): Promise<void> {
   const payload: Record<string, unknown> = {
     input: [{ role: "user", type: "message", content: [{ type: "text", text: userText }] }],
@@ -982,14 +1023,14 @@ async function streamReply(
       break;
     }
     buffer += decoder.decode(chunk.value, { stream: true }).replaceAll("\r", "");
-    const result = consumeSSEBuffer(buffer, onDelta);
+    const result = consumeSSEBuffer(buffer, onDelta, onEvent);
     buffer = result.rest;
     doneReceived = result.done;
   }
 
   buffer += decoder.decode().replaceAll("\r", "");
   if (!doneReceived && buffer.trim() !== "") {
-    const result = consumeSSEBuffer(`${buffer}\n\n`, onDelta);
+    const result = consumeSSEBuffer(`${buffer}\n\n`, onDelta, onEvent);
     doneReceived = result.done;
   }
 
@@ -1017,7 +1058,11 @@ function parseChatBizParams(inputText: string): Record<string, unknown> | undefi
   };
 }
 
-function consumeSSEBuffer(raw: string, onDelta: (delta: string) => void): { done: boolean; rest: string } {
+function consumeSSEBuffer(
+  raw: string,
+  onDelta: (delta: string) => void,
+  onEvent?: (event: AgentStreamEvent) => void,
+): { done: boolean; rest: string } {
   let buffer = raw;
   let done = false;
   while (!done) {
@@ -1027,12 +1072,12 @@ function consumeSSEBuffer(raw: string, onDelta: (delta: string) => void): { done
     }
     const block = buffer.slice(0, boundary);
     buffer = buffer.slice(boundary + 2);
-    done = consumeSSEBlock(block, onDelta) || done;
+    done = consumeSSEBlock(block, onDelta, onEvent) || done;
   }
   return { done, rest: buffer };
 }
 
-function consumeSSEBlock(block: string, onDelta: (delta: string) => void): boolean {
+function consumeSSEBlock(block: string, onDelta: (delta: string) => void, onEvent?: (event: AgentStreamEvent) => void): boolean {
   if (block.trim() === "") {
     return false;
   }
@@ -1050,16 +1095,18 @@ function consumeSSEBlock(block: string, onDelta: (delta: string) => void): boole
     return true;
   }
   try {
-    const payload = JSON.parse(data) as { delta?: unknown };
+    const payload = JSON.parse(data) as AgentStreamEvent;
+    if (typeof payload.type === "string" && onEvent) {
+      onEvent(payload);
+    }
     if (typeof payload.delta === "string") {
       onDelta(payload.delta);
-      return false;
     }
+    return false;
   } catch {
     onDelta(data);
     return false;
   }
-  throw new Error(t("error.invalidSSEPayload"));
 }
 
 function renderChatList(): void {
@@ -1127,6 +1174,67 @@ function renderMessages(): void {
     messageList.appendChild(item);
   }
   messageList.scrollTop = messageList.scrollHeight;
+}
+
+function pushAgentEvent(event: AgentStreamEvent): void {
+  const text = formatAgentEvent(event);
+  if (text === "") {
+    return;
+  }
+  state.agentEvents = state.agentEvents.concat({
+    id: `event-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    text,
+  });
+  if (state.agentEvents.length > 120) {
+    state.agentEvents = state.agentEvents.slice(state.agentEvents.length - 120);
+  }
+  renderAgentEvents();
+}
+
+function renderAgentEvents(): void {
+  agentEventList.innerHTML = "";
+  if (state.agentEvents.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "message-empty";
+    empty.textContent = t("chat.emptyEvents");
+    agentEventList.appendChild(empty);
+    return;
+  }
+  for (const event of state.agentEvents) {
+    const item = document.createElement("li");
+    item.className = "agent-event-item";
+    item.textContent = event.text;
+    agentEventList.appendChild(item);
+  }
+  agentEventList.scrollTop = agentEventList.scrollHeight;
+}
+
+function formatAgentEvent(event: AgentStreamEvent): string {
+  const stepText = typeof event.step === "number" ? String(event.step) : "-";
+  switch (event.type) {
+    case "step_started":
+      return t("chat.eventStepStarted", { step: stepText });
+    case "tool_call":
+      return t("chat.eventToolCall", {
+        step: stepText,
+        name: event.tool_call?.name ?? "unknown",
+      });
+    case "tool_result":
+      return t("chat.eventToolResult", {
+        step: stepText,
+        name: event.tool_result?.name ?? "unknown",
+        summary: event.tool_result?.summary ?? "",
+      });
+    case "assistant_delta":
+      return "";
+    case "completed":
+      return t("chat.eventCompleted", { step: stepText });
+    default:
+      if (typeof event.type === "string" && event.type !== "") {
+        return t("chat.eventGeneric", { type: event.type, step: stepText });
+      }
+      return "";
+  }
 }
 
 async function refreshModels(): Promise<void> {

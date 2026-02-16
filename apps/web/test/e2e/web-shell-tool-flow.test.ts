@@ -104,7 +104,15 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
         capturedCommand = payload.biz_params?.tool?.input?.command ?? "";
         expect(payload.biz_params?.tool?.name).toBe("shell");
 
-        const sse = `data: ${JSON.stringify({ delta: "shell done" })}\n\ndata: [DONE]\n\n`;
+        const sse = [
+          `data: ${JSON.stringify({ type: "step_started", step: 1 })}`,
+          `data: ${JSON.stringify({ type: "tool_call", step: 1, tool_call: { name: "shell", input: { command: capturedCommand } } })}`,
+          `data: ${JSON.stringify({ type: "tool_result", step: 1, tool_result: { name: "shell", ok: true, summary: "done" } })}`,
+          `data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "shell done" })}`,
+          `data: ${JSON.stringify({ type: "completed", step: 1, reply: "shell done" })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n");
         return new Response(sse, {
           status: 200,
           headers: {
@@ -149,5 +157,8 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
       const messages = Array.from(document.querySelectorAll<HTMLLIElement>("#message-list .message.assistant"));
       return messages.some((item) => item.textContent?.includes("shell done"));
     }, 4000);
+
+    const eventItems = Array.from(document.querySelectorAll<HTMLLIElement>("#agent-event-list .agent-event-item"));
+    expect(eventItems.length).toBeGreaterThan(0);
   });
 });

@@ -1,6 +1,6 @@
 # CoPaw Next TODO
 
-更新时间：2026-02-16 22:08:40 +0800
+更新时间：2026-02-16 23:43:59 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`。
@@ -65,10 +65,16 @@
 - [x] 2026-02-16 22:01 +0800 Web 工作区页面改名为配置页面：前端保留 `workspace` 逻辑与接口不变，仅将页面与 i18n 可见文案统一为“配置/Config”；验证通过 `pnpm -C apps/web test`（13 tests）与 `pnpm -C apps/web build`。
 - [x] 2026-02-16 22:02 +0800 Web 聊天区高度锁定修复：`apps/web/src/styles.css` 中 `.chat` 由 `min-height` 改为固定 `height: 72vh` + `max-height: 72vh`，保留 `.messages` 的滚动逻辑，避免内容撑高；验证通过 `pnpm -C apps/web test`（13 tests）与 `pnpm -C apps/web build`。
 - [x] 2026-02-16 22:08 +0800 聊天电脑操作能力补齐：Gateway 新增 `shell` 工具插件并在 `/agent/process` 接入 `biz_params.tool` 调用链，Web 聊天支持通过 `/shell <command>` 自动构造工具请求，新增网关与 Web e2e 回归测试；验证通过 `cd apps/gateway && go test ./...`、`pnpm -C apps/web test`（14 tests）与 `pnpm -C apps/web build`。
+- [x] 2026-02-16 23:37 +0800 CLI workspace export 默认输出补齐：`workspace export` 增加 `--out` 默认值 `workspace.json`，未显式传参时自动写入当前目录同名文件。
+- [x] 2026-02-16 23:37 +0800 e2e 默认导出行为覆盖补齐：新增 `workspace export` 未传 `--out` 的 e2e 用例，断言默认输出文件名为 `workspace.json`。
+- [x] 2026-02-16 23:40 +0800 e2e 默认导入行为覆盖补齐：新增 `workspace import` 输入缺省 `mode` 时默认补 `replace` 的 e2e 用例。
+- [x] 2026-02-16 23:44 +0800 e2e 失败场景覆盖补齐：新增 `workspace put` 同时缺少 `--body` 与 `--file` 的失败场景覆盖。
 
-## 7. 当前未完成项与阻塞（2026-02-16 22:08:40 +0800）
+## 7. 当前未完成项与阻塞（2026-02-16 23:40:55 +0800）
 - [x] 设计并实现 provider 可删除方案（含内置 provider），并完成 catalog/active/default 语义调整：删除后从 `/models/catalog` 消失；删掉激活 provider 后 `active_llm` 置空。
 - [x] 风险已消除：删除全部 provider 后，`/agent/process` 在 `active_llm` 为空时走内部 demo 回声兜底；并有回归测试覆盖（`apps/gateway/internal/app/server_test.go`）。
 - [ ] 阻塞：无法将 PR 分支远端回退到 `1c94b19`。原因：当前环境策略禁止强推（`git push --force-with-lease` 与 `git push origin +ref` 均被 policy 拦截）；仅普通 `git push` 可执行但因 non-fast-forward 被拒绝。
 - [x] 待办已关闭：`/workspace` 重构改动已提交为 `eca30a5` 与 `74c31f9`，并已推送分支 `refactor/rename-copaw-to-nextai`（见最近提交记录）。
 - [x] 待办已关闭：Web 工作区 404 诊断提示修复已提交为 `603906c`。
+
+- [x] 2026-02-16 23:42 +0800 Agent 多步自治链路落地：`/agent/process` 支持模型 `tool_calls` 循环与结构化事件流（`step_started`/`tool_call`/`tool_result`/`assistant_delta`/`completed`）；Web 聊天区新增 Agent 事件流展示并保留 `delta + [DONE]` 兼容；验证通过 `cd apps/gateway && go test ./...`、`pnpm -C apps/web test`、`pnpm -C apps/web build`、`pnpm --filter @copaw-next/tests-contract run lint && pnpm --filter @copaw-next/tests-contract run test`。

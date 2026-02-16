@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -36,6 +38,21 @@ func newTestServerWithDataDir(t *testing.T, dataDir string) *Server {
 	}
 	t.Cleanup(func() { srv.Close() })
 	return srv
+}
+
+func newToolTestPath(t *testing.T, prefix string) (string, string) {
+	t.Helper()
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.ToSlash(filepath.Join("apps/gateway/.data/tool-tests", fmt.Sprintf("%s-%d.txt", prefix, time.Now().UnixNano())))
+	abs := filepath.Join(repoRoot, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(abs) })
+	return rel, abs
 }
 
 func TestHealthz(t *testing.T) {
@@ -453,6 +470,102 @@ func TestProcessAgentOpenAIConfigured(t *testing.T) {
 	}
 	if !strings.Contains(w3.Body.String(), `"provider reply"`) {
 		t.Fatalf("unexpected body: %s", w3.Body.String())
+	}
+}
+
+func TestProcessAgentRunsMultiStepAgentLoop(t *testing.T) {
+	t.Setenv("NEXTAI_ENABLE_SHELL_TOOL", "true")
+
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_shell","type":"function","function":{"name":"shell","arguments":"{\"command\":\"printf from-tool\"}"}}]}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"final answer from tool"}}]}`))
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"read then answer"}]}],"session_id":"s-agent-loop","user_id":"u-agent-loop","channel":"console","stream":false}`
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w3.Code, w3.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+
+	var out domain.AgentProcessResponse
+	if err := json.Unmarshal(w3.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w3.Body.String())
+	}
+	if out.Reply != "final answer from tool" {
+		t.Fatalf("unexpected final reply: %q", out.Reply)
+	}
+	hasToolCall := false
+	hasToolResult := false
+	for _, evt := range out.Events {
+		if evt.Type == "tool_call" && evt.ToolCall != nil && evt.ToolCall.Name == "shell" {
+			hasToolCall = true
+		}
+		if evt.Type == "tool_result" && evt.ToolResult != nil && evt.ToolResult.Name == "shell" {
+			hasToolResult = true
+		}
+	}
+	if !hasToolCall || !hasToolResult {
+		t.Fatalf("expected tool_call/tool_result events, got=%+v", out.Events)
+	}
+}
+
+func TestProcessAgentStreamIncludesStructuredEvents(t *testing.T) {
+	t.Setenv("NEXTAI_ENABLE_SHELL_TOOL", "true")
+	srv := newTestServer(t)
+
+	procReq := `{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"stream tool"}]}],
+		"session_id":"s-stream-events",
+		"user_id":"u-stream-events",
+		"channel":"console",
+		"stream":true,
+		"biz_params":{"tool":{"name":"shell","input":{"command":"printf stream"}}}
+	}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"type":"tool_call"`) {
+		t.Fatalf("expected tool_call event, body=%s", body)
+	}
+	if !strings.Contains(body, `"type":"tool_result"`) {
+		t.Fatalf("expected tool_result event, body=%s", body)
+	}
+	if !strings.Contains(body, `"type":"assistant_delta"`) {
+		t.Fatalf("expected assistant_delta event, body=%s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("expected DONE marker, body=%s", body)
 	}
 }
 

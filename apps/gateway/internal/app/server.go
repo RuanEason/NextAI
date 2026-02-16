@@ -44,6 +44,10 @@ const (
 	cronStatusFailed    = "failed"
 
 	cronLeaseDirName = "cron-leases"
+
+	aiToolsGuideRelativePath       = "docs/AI/ai-tools.md"
+	aiToolsGuideLegacyRelativePath = "docs/ai-tools.md"
+	aiToolsGuidePathEnv            = "NEXTAI_AI_TOOLS_GUIDE_PATH"
 )
 
 var errCronJobNotFound = errors.New("cron_job_not_found")
@@ -473,6 +477,12 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Channel = channelName
 
+	aiToolsGuide, err := loadAIToolsGuide()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "ai_tool_guide_unavailable", "ai tools guide is unavailable", nil)
+		return
+	}
+
 	chatID := ""
 	activeLLM := domain.ModelSlotConfig{}
 	providerSetting := repo.ProviderSetting{}
@@ -507,20 +517,55 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
-	toolCall, hasToolCall, err := parseToolCall(req.BizParams)
+	requestedToolCall, hasToolCall, err := parseToolCall(req.BizParams)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_tool_request", err.Error(), nil)
+		writeErr(w, http.StatusBadRequest, "invalid_tool_input", err.Error(), nil)
 		return
 	}
 
 	reply := ""
+	events := make([]domain.AgentEvent, 0, 12)
+	appendEvent := func(evt domain.AgentEvent) {
+		events = append(events, evt)
+	}
+	appendReplyDeltas := func(step int, text string) {
+		for _, chunk := range splitReplyChunks(text, 12) {
+			appendEvent(domain.AgentEvent{
+				Type:  "assistant_delta",
+				Step:  step,
+				Delta: chunk,
+			})
+		}
+	}
+
 	if hasToolCall {
-		reply, err = s.executeToolCall(toolCall)
+		step := 1
+		appendEvent(domain.AgentEvent{Type: "step_started", Step: step})
+		appendEvent(domain.AgentEvent{
+			Type: "tool_call",
+			Step: step,
+			ToolCall: &domain.AgentToolCallPayload{
+				Name:  requestedToolCall.Name,
+				Input: safeMap(requestedToolCall.Input),
+			},
+		})
+		reply, err = s.executeToolCall(requestedToolCall)
 		if err != nil {
 			status, code, message := mapToolError(err)
 			writeErr(w, status, code, message, nil)
 			return
 		}
+		appendEvent(domain.AgentEvent{
+			Type: "tool_result",
+			Step: step,
+			ToolResult: &domain.AgentToolResultPayload{
+				Name:    requestedToolCall.Name,
+				OK:      true,
+				Summary: summarizeAgentEventText(reply),
+			},
+		})
+		appendReplyDeltas(step, reply)
+		appendEvent(domain.AgentEvent{Type: "completed", Step: step, Reply: reply})
 	} else {
 		generateConfig := runner.GenerateConfig{}
 		if activeLLM.ProviderID == "" || strings.TrimSpace(activeLLM.Model) == "" {
@@ -551,11 +596,77 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		reply, err = s.runner.GenerateReply(r.Context(), req, generateConfig)
-		if err != nil {
-			status, code, message := mapRunnerError(err)
-			writeErr(w, status, code, message, nil)
-			return
+		effectiveReq := req
+		effectiveReq.Input = prependAIToolsGuide(req.Input, aiToolsGuide)
+		workflowInput := cloneAgentInputMessages(effectiveReq.Input)
+		step := 1
+
+		for {
+			appendEvent(domain.AgentEvent{Type: "step_started", Step: step})
+			turnReq := effectiveReq
+			turnReq.Input = workflowInput
+			turn, runErr := s.runner.GenerateTurn(r.Context(), turnReq, generateConfig, s.listToolDefinitions())
+			if runErr != nil {
+				status, code, message := mapRunnerError(runErr)
+				writeErr(w, status, code, message, nil)
+				return
+			}
+			if len(turn.ToolCalls) == 0 {
+				reply = strings.TrimSpace(turn.Text)
+				if reply == "" {
+					reply = "(empty reply)"
+				}
+				appendReplyDeltas(step, reply)
+				appendEvent(domain.AgentEvent{Type: "completed", Step: step, Reply: reply})
+				break
+			}
+
+			assistantMessage := domain.AgentInputMessage{
+				Role:     "assistant",
+				Type:     "message",
+				Content:  []domain.RuntimeContent{},
+				Metadata: map[string]interface{}{"tool_calls": toAgentToolCallMetadata(turn.ToolCalls)},
+			}
+			if text := strings.TrimSpace(turn.Text); text != "" {
+				assistantMessage.Content = []domain.RuntimeContent{{Type: "text", Text: text}}
+			}
+			workflowInput = append(workflowInput, assistantMessage)
+
+			for _, call := range turn.ToolCalls {
+				appendEvent(domain.AgentEvent{
+					Type: "tool_call",
+					Step: step,
+					ToolCall: &domain.AgentToolCallPayload{
+						Name:  call.Name,
+						Input: safeMap(call.Arguments),
+					},
+				})
+				toolReply, toolErr := s.executeToolCall(toolCall{Name: call.Name, Input: safeMap(call.Arguments)})
+				if toolErr != nil {
+					status, code, message := mapToolError(toolErr)
+					writeErr(w, status, code, message, nil)
+					return
+				}
+				appendEvent(domain.AgentEvent{
+					Type: "tool_result",
+					Step: step,
+					ToolResult: &domain.AgentToolResultPayload{
+						Name:    call.Name,
+						OK:      true,
+						Summary: summarizeAgentEventText(toolReply),
+					},
+				})
+				workflowInput = append(workflowInput, domain.AgentInputMessage{
+					Role:    "tool",
+					Type:    "message",
+					Content: []domain.RuntimeContent{{Type: "text", Text: toolReply}},
+					Metadata: map[string]interface{}{
+						"tool_call_id": call.ID,
+						"name":         call.Name,
+					},
+				})
+			}
+			step++
 		}
 	}
 	assistant := domain.RuntimeMessage{
@@ -594,7 +705,10 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !req.Stream {
-		writeJSON(w, http.StatusOK, map[string]string{"reply": reply})
+		writeJSON(w, http.StatusOK, domain.AgentProcessResponse{
+			Reply:  reply,
+			Events: events,
+		})
 		return
 	}
 
@@ -607,11 +721,13 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for _, chunk := range splitReplyChunks(reply, 12) {
-		payload, _ := json.Marshal(map[string]string{"delta": chunk})
+	for _, evt := range events {
+		payload, _ := json.Marshal(evt)
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
 		flusher.Flush()
-		time.Sleep(20 * time.Millisecond)
+		if evt.Type == "assistant_delta" {
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
@@ -641,6 +757,180 @@ func splitReplyChunks(text string, chunkSize int) []string {
 		out = append(out, string(runes[i:end]))
 	}
 	return out
+}
+
+func (s *Server) listToolDefinitions() []runner.ToolDefinition {
+	if len(s.tools) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(s.tools))
+	for name := range s.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]runner.ToolDefinition, 0, len(names))
+	for _, name := range names {
+		out = append(out, buildToolDefinition(name))
+	}
+	return out
+}
+
+func buildToolDefinition(name string) runner.ToolDefinition {
+	switch name {
+	case "read_file":
+		return runner.ToolDefinition{
+			Name:        "read_file",
+			Description: "Read text content from a repository file path.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "Repository-relative file path.",
+					},
+				},
+				"required":             []string{"path"},
+				"additionalProperties": false,
+			},
+		}
+	case "create_file":
+		return runner.ToolDefinition{
+			Name:        "create_file",
+			Description: "Create a new repository file with provided text content.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "Repository-relative file path.",
+					},
+					"content": map[string]interface{}{
+						"type":        "string",
+						"description": "File content to write.",
+					},
+				},
+				"required":             []string{"path", "content"},
+				"additionalProperties": false,
+			},
+		}
+	case "update_file":
+		return runner.ToolDefinition{
+			Name:        "update_file",
+			Description: "Update an existing repository file with overwrite or append mode.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "Repository-relative file path.",
+					},
+					"content": map[string]interface{}{
+						"type":        "string",
+						"description": "Text content to write.",
+					},
+					"mode": map[string]interface{}{
+						"type": "string",
+						"enum": []string{"overwrite", "append"},
+					},
+				},
+				"required":             []string{"path", "content"},
+				"additionalProperties": false,
+			},
+		}
+	case "shell":
+		return runner.ToolDefinition{
+			Name:        "shell",
+			Description: "Execute a shell command under server security controls.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"command": map[string]interface{}{
+						"type": "string",
+					},
+					"cwd": map[string]interface{}{
+						"type": "string",
+					},
+					"timeout_seconds": map[string]interface{}{
+						"type":    "integer",
+						"minimum": 1,
+					},
+				},
+				"required": []string{"command"},
+			},
+		}
+	default:
+		return runner.ToolDefinition{
+			Name: name,
+			Parameters: map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": true,
+			},
+		}
+	}
+}
+
+func toAgentToolCallMetadata(calls []runner.ToolCall) []map[string]interface{} {
+	if len(calls) == 0 {
+		return []map[string]interface{}{}
+	}
+	out := make([]map[string]interface{}, 0, len(calls))
+	for _, call := range calls {
+		if strings.TrimSpace(call.Name) == "" {
+			continue
+		}
+		callID := strings.TrimSpace(call.ID)
+		if callID == "" {
+			callID = newID("tool-call")
+		}
+		args, _ := json.Marshal(safeMap(call.Arguments))
+		out = append(out, map[string]interface{}{
+			"id":   callID,
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":      call.Name,
+				"arguments": string(args),
+			},
+		})
+	}
+	return out
+}
+
+func cloneAgentInputMessages(input []domain.AgentInputMessage) []domain.AgentInputMessage {
+	if len(input) == 0 {
+		return []domain.AgentInputMessage{}
+	}
+	out := make([]domain.AgentInputMessage, 0, len(input))
+	for _, item := range input {
+		cloned := domain.AgentInputMessage{
+			Role:    item.Role,
+			Type:    item.Type,
+			Content: append([]domain.RuntimeContent{}, item.Content...),
+		}
+		if item.Metadata != nil {
+			data, err := json.Marshal(item.Metadata)
+			if err == nil {
+				var meta map[string]interface{}
+				if err := json.Unmarshal(data, &meta); err == nil {
+					cloned.Metadata = meta
+				}
+			}
+		}
+		out = append(out, cloned)
+	}
+	return out
+}
+
+func summarizeAgentEventText(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return ""
+	}
+	runes := []rune(trimmed)
+	if len(runes) <= 160 {
+		return trimmed
+	}
+	return string(runes[:160]) + "..."
 }
 
 type channelError struct {
@@ -1919,6 +2209,7 @@ const (
 	workspaceFileChannels  = "config/channels.json"
 	workspaceFileModels    = "config/models.json"
 	workspaceFileActiveLLM = "config/active-llm.json"
+	workspaceFileAITools   = aiToolsGuideRelativePath
 )
 
 type workspaceFileEntry struct {
@@ -1958,6 +2249,10 @@ func (s *Server) listWorkspaceFiles(w http.ResponseWriter, _ *http.Request) {
 	s.store.Read(func(st *repo.State) {
 		out.Files = collectWorkspaceFiles(st)
 	})
+	if aiToolsFile, ok := workspaceAIToolsFileEntry(); ok {
+		out.Files = append(out.Files, aiToolsFile)
+		sort.Slice(out.Files, func(i, j int) bool { return out.Files[i].Path < out.Files[j].Path })
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -1965,6 +2260,23 @@ func (s *Server) getWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	filePath, ok := workspaceFilePathFromRequest(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid_path", "invalid workspace file path", nil)
+		return
+	}
+	if isAIToolsWorkspaceFilePath(filePath) {
+		resolvedPath, content, err := readAIToolsGuideRawWithPath()
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				writeErr(w, http.StatusNotFound, "not_found", "workspace file not found", nil)
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, "file_error", err.Error(), nil)
+			return
+		}
+		if filePath != resolvedPath {
+			writeErr(w, http.StatusNotFound, "not_found", "workspace file not found", nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"content": content})
 		return
 	}
 
@@ -1984,6 +2296,25 @@ func (s *Server) putWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	filePath, ok := workspaceFilePathFromRequest(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid_path", "invalid workspace file path", nil)
+		return
+	}
+	if isAIToolsWorkspaceFilePath(filePath) {
+		var body struct {
+			Content string `json:"content"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
+			return
+		}
+		if strings.TrimSpace(body.Content) == "" {
+			writeErr(w, http.StatusBadRequest, "invalid_ai_tools_guide", "content is required", nil)
+			return
+		}
+		if err := writeAIToolsGuideRawForPath(filePath, body.Content); err != nil {
+			writeErr(w, http.StatusInternalServerError, "file_error", err.Error(), nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
 		return
 	}
 
@@ -2322,7 +2653,8 @@ func isWorkspaceConfigFile(filePath string) bool {
 	return filePath == workspaceFileEnvs ||
 		filePath == workspaceFileChannels ||
 		filePath == workspaceFileModels ||
-		filePath == workspaceFileActiveLLM
+		filePath == workspaceFileActiveLLM ||
+		isAIToolsWorkspaceFilePath(filePath)
 }
 
 func normalizeWorkspaceEnvs(in map[string]string) (map[string]string, error) {
@@ -2824,4 +3156,211 @@ func safeMap(v map[string]interface{}) map[string]interface{} {
 		return map[string]interface{}{}
 	}
 	return v
+}
+
+func prependAIToolsGuide(input []domain.AgentInputMessage, guide string) []domain.AgentInputMessage {
+	effective := make([]domain.AgentInputMessage, 0, len(input)+1)
+	effective = append(effective, domain.AgentInputMessage{
+		Role:    "system",
+		Type:    "message",
+		Content: []domain.RuntimeContent{{Type: "text", Text: guide}},
+	})
+	effective = append(effective, input...)
+	return effective
+}
+
+func loadAIToolsGuide() (string, error) {
+	content, err := readAIToolsGuideRaw()
+	if err != nil {
+		return "", err
+	}
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return "", errors.New("ai tools guide is empty")
+	}
+	return trimmed, nil
+}
+
+func workspaceAIToolsFileEntry() (workspaceFileEntry, bool) {
+	relativePath, content, err := readAIToolsGuideRawWithPath()
+	if err != nil {
+		return workspaceFileEntry{}, false
+	}
+	return workspaceFileEntry{
+		Path: relativePath,
+		Kind: "config",
+		Size: len([]byte(content)),
+	}, true
+}
+
+func readAIToolsGuideRaw() (string, error) {
+	_, content, err := readAIToolsGuideRawWithPath()
+	if err != nil {
+		return "", err
+	}
+	return content, nil
+}
+
+func readAIToolsGuideRawWithPath() (string, string, error) {
+	guidePath, relativePath, err := resolveAIToolsGuidePathForRead()
+	if err != nil {
+		return "", "", err
+	}
+	content, err := os.ReadFile(guidePath)
+	if err != nil {
+		return "", "", err
+	}
+	return relativePath, string(content), nil
+}
+
+func writeAIToolsGuideRaw(content string) error {
+	return writeAIToolsGuideRawForPath("", content)
+}
+
+func writeAIToolsGuideRawForPath(relativePath, content string) error {
+	guidePath, _, err := resolveAIToolsGuidePathForWrite(relativePath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(guidePath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(guidePath, []byte(content), 0o644)
+}
+
+func isAIToolsWorkspaceFilePath(filePath string) bool {
+	path := strings.TrimSpace(filePath)
+	if path == "" {
+		return false
+	}
+	candidates, err := aiToolsGuidePathCandidates()
+	if err != nil {
+		return false
+	}
+	for _, candidate := range candidates {
+		if path == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveAIToolsGuidePathForRead() (string, string, error) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		return "", "", err
+	}
+	candidates, err := aiToolsGuidePathCandidates()
+	if err != nil {
+		return "", "", err
+	}
+	for _, relativePath := range candidates {
+		guidePath := filepath.Join(repoRoot, filepath.FromSlash(relativePath))
+		info, statErr := os.Stat(guidePath)
+		if statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				continue
+			}
+			return "", "", statErr
+		}
+		if info.IsDir() {
+			continue
+		}
+		return guidePath, relativePath, nil
+	}
+	return "", "", fmt.Errorf("%w: ai tools guide not found in %s", os.ErrNotExist, strings.Join(candidates, ", "))
+}
+
+func resolveAIToolsGuidePathForWrite(relativePath string) (string, string, error) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		return "", "", err
+	}
+	target := strings.TrimSpace(relativePath)
+	if target == "" {
+		envPath, hasEnv, err := aiToolsGuidePathFromEnv()
+		if err != nil {
+			return "", "", err
+		}
+		if hasEnv {
+			target = envPath
+		} else {
+			target = aiToolsGuideRelativePath
+		}
+	}
+	normalized, ok := normalizeAIToolsGuideRelativePath(target)
+	if !ok {
+		return "", "", errors.New("invalid ai tools guide path")
+	}
+	return filepath.Join(repoRoot, filepath.FromSlash(normalized)), normalized, nil
+}
+
+func aiToolsGuidePathCandidates() ([]string, error) {
+	candidates := []string{}
+	if envPath, hasEnv, err := aiToolsGuidePathFromEnv(); err != nil {
+		return nil, err
+	} else if hasEnv {
+		candidates = append(candidates, envPath)
+	}
+	candidates = append(candidates, aiToolsGuideRelativePath, aiToolsGuideLegacyRelativePath)
+
+	seen := map[string]struct{}{}
+	unique := make([]string, 0, len(candidates))
+	for _, path := range candidates {
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		unique = append(unique, path)
+	}
+	return unique, nil
+}
+
+func aiToolsGuidePathFromEnv() (string, bool, error) {
+	raw := strings.TrimSpace(os.Getenv(aiToolsGuidePathEnv))
+	if raw == "" {
+		return "", false, nil
+	}
+	normalized, ok := normalizeAIToolsGuideRelativePath(raw)
+	if !ok {
+		return "", false, fmt.Errorf("%s must be a relative path without traversal", aiToolsGuidePathEnv)
+	}
+	return normalized, true, nil
+}
+
+func normalizeAIToolsGuideRelativePath(raw string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || filepath.IsAbs(trimmed) {
+		return "", false
+	}
+	clean := filepath.ToSlash(filepath.Clean(trimmed))
+	if clean == "." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+		return "", false
+	}
+	parts := strings.Split(clean, "/")
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return "", false
+		}
+	}
+	return clean, true
+}
+
+func findRepoRoot() (string, error) {
+	start, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	current := start
+	for {
+		if _, err := os.Stat(filepath.Join(current, ".git")); err == nil {
+			return current, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return "", errors.New("repository root not found")
 }

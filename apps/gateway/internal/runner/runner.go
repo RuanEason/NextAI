@@ -59,9 +59,26 @@ type GenerateConfig struct {
 	TimeoutMS  int
 }
 
+type ToolDefinition struct {
+	Name        string
+	Description string
+	Parameters  map[string]interface{}
+}
+
+type ToolCall struct {
+	ID        string
+	Name      string
+	Arguments map[string]interface{}
+}
+
+type TurnResult struct {
+	Text      string
+	ToolCalls []ToolCall
+}
+
 type ProviderAdapter interface {
 	ID() string
-	GenerateReply(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig, runner *Runner) (string, error)
+	GenerateTurn(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig, tools []ToolDefinition, runner *Runner) (TurnResult, error)
 }
 
 type Runner struct {
@@ -97,7 +114,7 @@ func (r *Runner) registerAdapter(adapter ProviderAdapter) {
 	r.adapters[id] = adapter
 }
 
-func (r *Runner) GenerateReply(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig) (string, error) {
+func (r *Runner) GenerateTurn(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig, tools []ToolDefinition) (TurnResult, error) {
 	providerID := strings.ToLower(strings.TrimSpace(cfg.ProviderID))
 	if providerID == "" {
 		providerID = ProviderDemo
@@ -108,24 +125,39 @@ func (r *Runner) GenerateReply(ctx context.Context, req domain.AgentProcessReque
 		adapterID = defaultAdapterForProvider(providerID)
 	}
 	if adapterID == "" {
-		return "", &RunnerError{
+		return TurnResult{}, &RunnerError{
 			Code:    ErrorCodeProviderNotSupported,
 			Message: fmt.Sprintf("provider %q is not supported", providerID),
 		}
 	}
 
 	if adapterID != provider.AdapterDemo && strings.TrimSpace(cfg.Model) == "" {
-		return "", &RunnerError{Code: ErrorCodeProviderNotConfigured, Message: "model is required for active provider"}
+		return TurnResult{}, &RunnerError{Code: ErrorCodeProviderNotConfigured, Message: "model is required for active provider"}
 	}
 
 	adapter, ok := r.adapters[adapterID]
 	if !ok {
-		return "", &RunnerError{
+		return TurnResult{}, &RunnerError{
 			Code:    ErrorCodeProviderNotSupported,
 			Message: fmt.Sprintf("adapter %q is not supported", adapterID),
 		}
 	}
-	return adapter.GenerateReply(ctx, req, cfg, r)
+	return adapter.GenerateTurn(ctx, req, cfg, tools, r)
+}
+
+func (r *Runner) GenerateReply(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig) (string, error) {
+	turn, err := r.GenerateTurn(ctx, req, cfg, nil)
+	if err != nil {
+		return "", err
+	}
+	if len(turn.ToolCalls) > 0 {
+		return "", &RunnerError{Code: ErrorCodeProviderInvalidReply, Message: "provider response contains tool calls but tool support is disabled"}
+	}
+	text := strings.TrimSpace(turn.Text)
+	if text == "" {
+		return "", &RunnerError{Code: ErrorCodeProviderInvalidReply, Message: "provider response has empty content"}
+	}
+	return text, nil
 }
 
 type demoAdapter struct{}
@@ -134,8 +166,8 @@ func (a *demoAdapter) ID() string {
 	return provider.AdapterDemo
 }
 
-func (a *demoAdapter) GenerateReply(_ context.Context, req domain.AgentProcessRequest, _ GenerateConfig, _ *Runner) (string, error) {
-	return generateDemoReply(req), nil
+func (a *demoAdapter) GenerateTurn(_ context.Context, req domain.AgentProcessRequest, _ GenerateConfig, _ []ToolDefinition, _ *Runner) (TurnResult, error) {
+	return TurnResult{Text: generateDemoReply(req)}, nil
 }
 
 type openAICompatibleAdapter struct{}
@@ -144,8 +176,8 @@ func (a *openAICompatibleAdapter) ID() string {
 	return provider.AdapterOpenAICompatible
 }
 
-func (a *openAICompatibleAdapter) GenerateReply(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig, runner *Runner) (string, error) {
-	return runner.generateOpenAICompatibleReply(ctx, req, cfg)
+func (a *openAICompatibleAdapter) GenerateTurn(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig, tools []ToolDefinition, runner *Runner) (TurnResult, error) {
+	return runner.generateOpenAICompatibleTurn(ctx, req, cfg, tools)
 }
 
 func defaultAdapterForProvider(providerID string) string {
@@ -177,10 +209,10 @@ func generateDemoReply(req domain.AgentProcessRequest) string {
 	return "Echo: " + strings.Join(parts, " ")
 }
 
-func (r *Runner) generateOpenAICompatibleReply(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig) (string, error) {
+func (r *Runner) generateOpenAICompatibleTurn(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig, tools []ToolDefinition) (TurnResult, error) {
 	apiKey := strings.TrimSpace(cfg.APIKey)
 	if apiKey == "" {
-		return "", &RunnerError{Code: ErrorCodeProviderNotConfigured, Message: "provider api_key is required"}
+		return TurnResult{}, &RunnerError{Code: ErrorCodeProviderNotConfigured, Message: "provider api_key is required"}
 	}
 
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
@@ -191,14 +223,15 @@ func (r *Runner) generateOpenAICompatibleReply(ctx context.Context, req domain.A
 	payload := openAIChatRequest{
 		Model:    cfg.Model,
 		Messages: toOpenAIMessages(req.Input),
+		Tools:    toOpenAITools(tools),
 	}
 	if len(payload.Messages) == 0 {
-		return generateDemoReply(req), nil
+		return TurnResult{Text: generateDemoReply(req)}, nil
 	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", &RunnerError{
+		return TurnResult{}, &RunnerError{
 			Code:    ErrorCodeProviderRequestFailed,
 			Message: "failed to encode provider request",
 			Err:     err,
@@ -214,7 +247,7 @@ func (r *Runner) generateOpenAICompatibleReply(ctx context.Context, req domain.A
 
 	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return "", &RunnerError{
+		return TurnResult{}, &RunnerError{
 			Code:    ErrorCodeProviderRequestFailed,
 			Message: "failed to create provider request",
 			Err:     err,
@@ -233,7 +266,7 @@ func (r *Runner) generateOpenAICompatibleReply(ctx context.Context, req domain.A
 
 	resp, err := r.httpClient.Do(httpReq)
 	if err != nil {
-		return "", &RunnerError{
+		return TurnResult{}, &RunnerError{
 			Code:    ErrorCodeProviderRequestFailed,
 			Message: "provider request failed",
 			Err:     err,
@@ -243,7 +276,7 @@ func (r *Runner) generateOpenAICompatibleReply(ctx context.Context, req domain.A
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 	if err != nil {
-		return "", &RunnerError{
+		return TurnResult{}, &RunnerError{
 			Code:    ErrorCodeProviderRequestFailed,
 			Message: "failed to read provider response",
 			Err:     err,
@@ -251,7 +284,7 @@ func (r *Runner) generateOpenAICompatibleReply(ctx context.Context, req domain.A
 	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return "", &RunnerError{
+		return TurnResult{}, &RunnerError{
 			Code:    ErrorCodeProviderRequestFailed,
 			Message: fmt.Sprintf("provider returned status %d", resp.StatusCode),
 		}
@@ -259,43 +292,80 @@ func (r *Runner) generateOpenAICompatibleReply(ctx context.Context, req domain.A
 
 	var completion openAIChatResponse
 	if err := json.Unmarshal(respBody, &completion); err != nil {
-		return "", &RunnerError{
+		return TurnResult{}, &RunnerError{
 			Code:    ErrorCodeProviderInvalidReply,
 			Message: "provider response is not valid json",
 			Err:     err,
 		}
 	}
 	if len(completion.Choices) == 0 {
-		return "", &RunnerError{
+		return TurnResult{}, &RunnerError{
 			Code:    ErrorCodeProviderInvalidReply,
 			Message: "provider response has no choices",
 		}
 	}
 
-	text := strings.TrimSpace(extractOpenAIContent(completion.Choices[0].Message.Content))
-	if text == "" {
-		return "", &RunnerError{
+	message := completion.Choices[0].Message
+	text := strings.TrimSpace(extractOpenAIContent(message.Content))
+	toolCalls, err := parseOpenAIToolCalls(message.ToolCalls)
+	if err != nil {
+		return TurnResult{}, &RunnerError{
+			Code:    ErrorCodeProviderInvalidReply,
+			Message: err.Error(),
+			Err:     err,
+		}
+	}
+	if text == "" && len(toolCalls) == 0 {
+		return TurnResult{}, &RunnerError{
 			Code:    ErrorCodeProviderInvalidReply,
 			Message: "provider response has empty content",
 		}
 	}
-	return text, nil
+
+	return TurnResult{Text: text, ToolCalls: toolCalls}, nil
 }
 
 type openAIChatRequest struct {
-	Model    string          `json:"model"`
-	Messages []openAIMessage `json:"messages"`
+	Model    string                 `json:"model"`
+	Messages []openAIMessage        `json:"messages"`
+	Tools    []openAIToolDefinition `json:"tools,omitempty"`
 }
 
 type openAIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string           `json:"role"`
+	Content    interface{}      `json:"content,omitempty"`
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+	Name       string           `json:"name,omitempty"`
+}
+
+type openAIToolDefinition struct {
+	Type     string             `json:"type"`
+	Function openAIToolFunction `json:"function"`
+}
+
+type openAIToolFunction struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	Parameters  map[string]interface{} `json:"parameters"`
+}
+
+type openAIToolCall struct {
+	ID       string             `json:"id,omitempty"`
+	Type     string             `json:"type,omitempty"`
+	Function openAIFunctionCall `json:"function"`
+}
+
+type openAIFunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments,omitempty"`
 }
 
 type openAIChatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content json.RawMessage `json:"content"`
+			Content   json.RawMessage  `json:"content"`
+			ToolCalls []openAIToolCall `json:"tool_calls,omitempty"`
 		} `json:"message"`
 	} `json:"choices"`
 }
@@ -303,14 +373,176 @@ type openAIChatResponse struct {
 func toOpenAIMessages(input []domain.AgentInputMessage) []openAIMessage {
 	out := make([]openAIMessage, 0, len(input))
 	for _, msg := range input {
+		role := normalizeRole(msg.Role)
 		content := strings.TrimSpace(flattenText(msg.Content))
-		if content == "" {
+
+		switch role {
+		case "assistant":
+			toolCalls := parseToolCallsFromMetadata(msg.Metadata)
+			item := openAIMessage{Role: role}
+			if content != "" {
+				item.Content = content
+			}
+			if len(toolCalls) > 0 {
+				item.ToolCalls = toolCalls
+			}
+			if item.Content == nil && len(item.ToolCalls) == 0 {
+				continue
+			}
+			out = append(out, item)
+		case "tool":
+			item := openAIMessage{
+				Role:    role,
+				Content: content,
+			}
+			if item.Content == nil {
+				item.Content = ""
+			}
+			if toolCallID := metadataString(msg.Metadata, "tool_call_id"); toolCallID != "" {
+				item.ToolCallID = toolCallID
+			}
+			if name := metadataString(msg.Metadata, "name"); name != "" {
+				item.Name = name
+			}
+			out = append(out, item)
+		default:
+			if content == "" {
+				continue
+			}
+			out = append(out, openAIMessage{Role: role, Content: content})
+		}
+	}
+	return out
+}
+
+func toOpenAITools(tools []ToolDefinition) []openAIToolDefinition {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]openAIToolDefinition, 0, len(tools))
+	for _, item := range tools {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
 			continue
 		}
-		out = append(out, openAIMessage{
-			Role:    normalizeRole(msg.Role),
-			Content: content,
+		params := normalizeToolParameters(item.Parameters)
+		out = append(out, openAIToolDefinition{
+			Type: "function",
+			Function: openAIToolFunction{
+				Name:        name,
+				Description: strings.TrimSpace(item.Description),
+				Parameters:  params,
+			},
 		})
+	}
+	return out
+}
+
+func parseOpenAIToolCalls(in []openAIToolCall) ([]ToolCall, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	calls := make([]ToolCall, 0, len(in))
+	for i, item := range in {
+		name := strings.TrimSpace(item.Function.Name)
+		if name == "" {
+			return nil, fmt.Errorf("provider tool call[%d] name is empty", i)
+		}
+		callID := strings.TrimSpace(item.ID)
+		if callID == "" {
+			callID = fmt.Sprintf("call_%d", i+1)
+		}
+		argumentsRaw := strings.TrimSpace(item.Function.Arguments)
+		if argumentsRaw == "" {
+			argumentsRaw = "{}"
+		}
+		var arguments map[string]interface{}
+		if err := json.Unmarshal([]byte(argumentsRaw), &arguments); err != nil {
+			return nil, fmt.Errorf("provider tool call %q has invalid arguments: %w", name, err)
+		}
+		if arguments == nil {
+			arguments = map[string]interface{}{}
+		}
+		calls = append(calls, ToolCall{ID: callID, Name: name, Arguments: arguments})
+	}
+	return calls, nil
+}
+
+func parseToolCallsFromMetadata(metadata map[string]interface{}) []openAIToolCall {
+	if len(metadata) == 0 {
+		return nil
+	}
+	raw, ok := metadata["tool_calls"]
+	if !ok || raw == nil {
+		return nil
+	}
+	buf, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var out []openAIToolCall
+	if err := json.Unmarshal(buf, &out); err != nil {
+		return nil
+	}
+	valid := make([]openAIToolCall, 0, len(out))
+	for _, call := range out {
+		name := strings.TrimSpace(call.Function.Name)
+		if name == "" {
+			continue
+		}
+		if strings.TrimSpace(call.ID) == "" {
+			continue
+		}
+		args := strings.TrimSpace(call.Function.Arguments)
+		if args == "" {
+			call.Function.Arguments = "{}"
+		}
+		if strings.TrimSpace(call.Type) == "" {
+			call.Type = "function"
+		}
+		valid = append(valid, call)
+	}
+	return valid
+}
+
+func metadataString(metadata map[string]interface{}, key string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	raw, ok := metadata[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(text)
+}
+
+func normalizeToolParameters(in map[string]interface{}) map[string]interface{} {
+	if len(in) == 0 {
+		return map[string]interface{}{
+			"type":                 "object",
+			"additionalProperties": true,
+		}
+	}
+	buf, err := json.Marshal(in)
+	if err != nil {
+		return map[string]interface{}{
+			"type":                 "object",
+			"additionalProperties": true,
+		}
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(buf, &out); err != nil {
+		return map[string]interface{}{
+			"type":                 "object",
+			"additionalProperties": true,
+		}
+	}
+	if _, ok := out["type"]; !ok {
+		out["type"] = "object"
 	}
 	return out
 }
