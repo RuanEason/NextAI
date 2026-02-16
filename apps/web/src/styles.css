@@ -233,6 +233,11 @@ button:disabled {
   font-size: 16px;
 }
 
+.panel-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
 .chat-head {
   gap: 14px;
 }
@@ -277,6 +282,10 @@ button:disabled {
   background: transparent;
   color: inherit;
   border-color: rgba(28, 26, 23, 0.16);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
 }
 
 .chat-item-btn.active {
@@ -395,6 +404,12 @@ button:disabled {
   gap: 10px;
 }
 
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .detail-item {
   border: 1px solid rgba(28, 26, 23, 0.14);
   border-radius: 12px;
@@ -434,6 +449,47 @@ button:disabled {
   gap: 10px;
 }
 
+.active-model-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.kv-editor {
+  display: grid;
+  gap: 8px;
+}
+
+.kv-rows {
+  display: grid;
+  gap: 8px;
+}
+
+.kv-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+}
+
+.kv-row button {
+  white-space: nowrap;
+}
+
+.custom-model-rows {
+  display: grid;
+  gap: 8px;
+}
+
+.custom-model-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.custom-model-row button {
+  white-space: nowrap;
+}
+
 .cron-form-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -446,6 +502,62 @@ button:disabled {
   display: flex;
   gap: 10px;
   justify-content: flex-end;
+}
+
+.danger-btn {
+  background: #8d2f12;
+}
+
+.danger-btn:hover:not(:disabled) {
+  box-shadow: 0 8px 16px rgba(121, 38, 19, 0.25);
+}
+
+.modal-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+
+.modal-shell.is-hidden {
+  display: none;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(20, 16, 12, 0.5);
+  backdrop-filter: blur(4px);
+}
+
+.modal-panel {
+  position: relative;
+  z-index: 1;
+  width: min(720px, 96vw);
+  max-height: min(90vh, 940px);
+  overflow: auto;
+  border-radius: 18px;
+  background: #f4ecde;
+  border: 1px solid rgba(28, 26, 23, 0.14);
+  box-shadow: 0 30px 60px rgba(49, 36, 26, 0.35);
+  animation: rise-in 180ms ease-out;
+}
+
+.neumorph-panel {
+  box-shadow: none;
+}
+
+.neumorph-panel .panel-body {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.neumorph-panel input,
+.neumorph-panel textarea {
+  border: 1px solid rgba(28, 26, 23, 0.1);
+  box-shadow: none;
 }
 
 .checkbox-inline {
@@ -547,7 +659,23 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .provider-grid {
+    grid-template-columns: 1fr;
+  }
+
   .cron-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .active-model-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .kv-row {
+    grid-template-columns: 1fr;
+  }
+
+  .custom-model-row {
     grid-template-columns: 1fr;
   }
 }
@@ -576,5 +704,10 @@ button:disabled {
 
   .actions-row {
     flex-direction: column;
+  }
+
+  .panel-actions {
+    flex-direction: row;
+    justify-content: flex-start;
   }
 }

@@ -150,6 +150,11 @@ type ProviderInfo struct {
 	CurrentBaseURL     string      `json:"current_base_url"`
 }
 
+type ProviderTypeInfo struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+}
+
 type ModelSlotConfig struct {
 	ProviderID string `json:"provider_id"`
 	Model      string `json:"model"`
@@ -160,9 +165,10 @@ type ActiveModelsInfo struct {
 }
 
 type ModelCatalogInfo struct {
-	Providers []ProviderInfo    `json:"providers"`
-	Defaults  map[string]string `json:"defaults"`
-	ActiveLLM ModelSlotConfig   `json:"active_llm"`
+	Providers     []ProviderInfo     `json:"providers"`
+	Defaults      map[string]string  `json:"defaults"`
+	ActiveLLM     ModelSlotConfig    `json:"active_llm"`
+	ProviderTypes []ProviderTypeInfo `json:"provider_types"`
 }
 
 type EnvVar struct {

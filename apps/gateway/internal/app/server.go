@@ -491,26 +491,36 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
-	if !providerEnabled(providerSetting) {
-		writeErr(w, http.StatusBadRequest, "provider_disabled", "active provider is disabled", nil)
-		return
+	generateConfig := runner.GenerateConfig{}
+	if activeLLM.ProviderID == "" || strings.TrimSpace(activeLLM.Model) == "" {
+		generateConfig = runner.GenerateConfig{
+			ProviderID: runner.ProviderDemo,
+			Model:      "demo-chat",
+			AdapterID:  provider.AdapterDemo,
+		}
+	} else {
+		if !providerEnabled(providerSetting) {
+			writeErr(w, http.StatusBadRequest, "provider_disabled", "active provider is disabled", nil)
+			return
+		}
+		resolvedModel, ok := provider.ResolveModelID(activeLLM.ProviderID, activeLLM.Model, providerSetting.ModelAliases)
+		if !ok {
+			writeErr(w, http.StatusBadRequest, "model_not_found", "active model is not available for provider", nil)
+			return
+		}
+		activeLLM.Model = resolvedModel
+		generateConfig = runner.GenerateConfig{
+			ProviderID: activeLLM.ProviderID,
+			Model:      activeLLM.Model,
+			APIKey:     resolveProviderAPIKey(activeLLM.ProviderID, providerSetting),
+			BaseURL:    resolveProviderBaseURL(activeLLM.ProviderID, providerSetting),
+			AdapterID:  provider.ResolveAdapter(activeLLM.ProviderID),
+			Headers:    sanitizeStringMap(providerSetting.Headers),
+			TimeoutMS:  providerSetting.TimeoutMS,
+		}
 	}
-	resolvedModel, ok := provider.ResolveModelID(activeLLM.ProviderID, activeLLM.Model, providerSetting.ModelAliases)
-	if !ok {
-		writeErr(w, http.StatusBadRequest, "model_not_found", "active model is not available for provider", nil)
-		return
-	}
-	activeLLM.Model = resolvedModel
 
-	reply, err := s.runner.GenerateReply(r.Context(), req, runner.GenerateConfig{
-		ProviderID: activeLLM.ProviderID,
-		Model:      activeLLM.Model,
-		APIKey:     resolveProviderAPIKey(activeLLM.ProviderID, providerSetting),
-		BaseURL:    resolveProviderBaseURL(activeLLM.ProviderID, providerSetting),
-		AdapterID:  provider.ResolveAdapter(activeLLM.ProviderID),
-		Headers:    sanitizeStringMap(providerSetting.Headers),
-		TimeoutMS:  providerSetting.TimeoutMS,
-	})
+	reply, err := s.runner.GenerateReply(r.Context(), req, generateConfig)
 	if err != nil {
 		status, code, message := mapRunnerError(err)
 		writeErr(w, status, code, message, nil)
@@ -1363,10 +1373,19 @@ func (s *Server) listProviders(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) getModelCatalog(w http.ResponseWriter, _ *http.Request) {
 	providers, defaults, active := s.collectProviderCatalog()
+	providerTypes := provider.ListProviderTypes()
+	typeOut := make([]domain.ProviderTypeInfo, 0, len(providerTypes))
+	for _, item := range providerTypes {
+		typeOut = append(typeOut, domain.ProviderTypeInfo{
+			ID:          item.ID,
+			DisplayName: item.DisplayName,
+		})
+	}
 	writeJSON(w, http.StatusOK, domain.ModelCatalogInfo{
-		Providers: providers,
-		Defaults:  defaults,
-		ActiveLLM: active,
+		Providers:     providers,
+		Defaults:      defaults,
+		ActiveLLM:     active,
+		ProviderTypes: typeOut,
 	})
 }
 
@@ -1374,10 +1393,6 @@ func (s *Server) configureProvider(w http.ResponseWriter, r *http.Request) {
 	providerID := normalizeProviderID(chi.URLParam(r, "provider_id"))
 	if providerID == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_provider_id", "provider_id is required", nil)
-		return
-	}
-	if !provider.IsBuiltinProviderID(providerID) {
-		writeErr(w, http.StatusBadRequest, "provider_not_supported", "provider is not supported", nil)
 		return
 	}
 	var body struct {
@@ -1444,28 +1459,20 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_provider_id", "provider_id is required", nil)
 		return
 	}
-	if provider.IsBuiltinProviderID(providerID) {
-		writeErr(w, http.StatusBadRequest, "builtin_provider_not_deletable", "builtin provider cannot be deleted", nil)
-		return
-	}
 
 	deleted := false
 	if err := s.store.Write(func(st *repo.State) error {
-		if normalizeProviderID(st.ActiveLLM.ProviderID) == providerID {
-			return errors.New("active_provider_in_use")
-		}
 		for key := range st.Providers {
 			if normalizeProviderID(key) == providerID {
 				delete(st.Providers, key)
 				deleted = true
 			}
 		}
+		if deleted && normalizeProviderID(st.ActiveLLM.ProviderID) == providerID {
+			st.ActiveLLM = domain.ModelSlotConfig{}
+		}
 		return nil
 	}); err != nil {
-		if err.Error() == "active_provider_in_use" {
-			writeErr(w, http.StatusBadRequest, "active_provider_in_use", "active provider cannot be deleted", nil)
-			return
-		}
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
@@ -1490,10 +1497,6 @@ func (s *Server) setActiveModels(w http.ResponseWriter, r *http.Request) {
 	body.Model = strings.TrimSpace(body.Model)
 	if body.ProviderID == "" || body.Model == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_model_slot", "provider_id and model are required", nil)
-		return
-	}
-	if !provider.IsBuiltinProviderID(body.ProviderID) {
-		writeErr(w, http.StatusBadRequest, "provider_not_supported", "provider is not supported", nil)
 		return
 	}
 	var out domain.ModelSlotConfig
@@ -1993,16 +1996,20 @@ func (s *Server) collectProviderCatalog() ([]domain.ProviderInfo, map[string]str
 
 		for rawID, setting := range st.Providers {
 			id := normalizeProviderID(rawID)
-			if id == "" || !provider.IsBuiltinProviderID(id) {
+			if id == "" {
 				continue
 			}
 			normalizeProviderSetting(&setting)
 			settingsByID[id] = setting
 		}
 
-		for _, id := range provider.ListBuiltinProviderIDs() {
+		ids := make([]string, 0, len(settingsByID))
+		for id := range settingsByID {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
 			setting := settingsByID[id]
-			normalizeProviderSetting(&setting)
 			out = append(out, buildProviderInfo(id, setting))
 			defaults[id] = provider.DefaultModelID(id)
 		}

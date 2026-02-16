@@ -1,6 +1,6 @@
 # CoPaw Next TODO
 
-更新时间：2026-02-16 11:46:09 +0800
+更新时间：2026-02-16 14:51:24 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`。
@@ -8,120 +8,47 @@
 - 每次执行后必须更新本文件：勾选完成项、记录阻塞原因、刷新“更新时间”。
 
 ## 0. 目标范围（v1）
-- 以 `copaw-local` 功能边界为目标。
-- 以 `openclaw` 的工程方法为基线（测试分层、CI 分层、契约优先、CLI 与 Gateway 分离）。
+- 以 `copaw-local` 功能边界为准，遵循 `openclaw` 的工程方法（契约优先、分层测试、CI 分层、CLI/Gateway 分离），不扩展超出 v1 范围能力。
 
 ## 1. 基础工程与规范
-- [x] 创建 Monorepo 基础结构（`apps/`、`packages/`、`tests/`）。
-- [x] 落地 `AGENTS.md` 规范文件。
-- [x] 统一包管理为 pnpm（仅保留 `pnpm-lock.yaml`）。
-- [x] 补充根目录 `README.md`、`Makefile`、`.env.example`。
-- [x] 增加 `CONTRIBUTING.md`（分支策略、PR 模板、提交规范）。
-- [x] 增加 `SECURITY.md`（漏洞提交流程、密钥管理策略）。
+- [x] Monorepo 结构、pnpm 包管理、核心文档（README/CONTRIBUTING/SECURITY）、`Makefile` 与 `.env.example` 已统一落地。
 
-## 2. Gateway（Go）
-- [x] 网关启动入口与配置加载（`COPAW_HOST`、`COPAW_PORT`、`COPAW_DATA_DIR`）。
-- [x] 基础接口：`/healthz`、`/version`。
-- [x] 聊天接口：`/chats`、`/chats/{chat_id}`、`/chats/batch-delete`。
-- [x] Agent 接口：`/agent/process`（支持流式 SSE 输出）。
-- [x] Cron 接口：`/cron/jobs*` 全套最小端点。
-- [x] 模型接口：`/models`、`/models/{provider_id}/config`、`/models/active`。
-- [x] 环境变量接口：`/envs`、`/envs/{key}`。
-- [x] 技能接口：`/skills*`（含 enable/disable/batch/files）。
-- [x] 工作区接口：`/workspace/download`、`/workspace/upload`。
-- [x] 渠道配置接口：`/config/channels*`。
-- [x] 统一错误模型：`{ error: { code, message, details } }`。
-- [x] 请求日志与 `X-Request-Id` 中间件。
-- [x] 工作区上传 zip 路径穿越拦截。
-- [x] 实现真实 LLM provider 适配（支持 OpenAI，默认 demo 兜底）。
-- [x] 实现真实 cron 调度器（常驻调度 + 重启恢复，interval 模式）。
-- [x] 实现多渠道插件（已支持 `console` + `webhook`，含渠道配置与派发）。
-- [x] 增加鉴权中间件（当前默认本地无鉴权）。
-- [x] 模型提供能力升级：新增 provider catalog、alias 解析、provider 启用开关、openai-compatible adapter 抽象（含 `/models/catalog`）。
-- [x] 模型 Provider 管理接口补齐删除能力（`DELETE /models/{provider_id}`，支持移除自定义 provider）。
-- [x] 模型 Provider 配置增强：支持 `display_name` 展示名持久化；Provider 仅允许内置项；历史自定义 provider 自动迁移至 `openai`。
+## 2. 核心实现（Gateway / CLI / Web）
+- [x] Gateway 已完成 v1 核心 API、统一错误模型、请求追踪、关键安全防护（如上传路径穿越拦截）、模型 provider/catalog/alias/配置管理等能力。
+- [x] CLI 已完成核心命令集、流式输出、错误分级提示、`--json` 机器输出、多语言与模型配置链路。
+- [x] Web 控制台已完成聊天与关键管理面板（Models/Envs/Skills/Workspace/Cron），并具备统一错误提示与多语言支持。
 
-## 3. CLI（TypeScript）
-- [x] CLI 入口与命令注册。
-- [x] API Client 封装（禁止直连业务存储）。
-- [x] 命令：`app/chats/cron/models/env/skills/workspace/channels` 最小集。
-- [x] `chats send --stream` 流式输出能力。
-- [x] 优化错误输出（按 error.code 分类提示）。
-- [x] 增加 `--json` 全局开关与机器可读输出模式。
-- [x] 增加命令级 e2e（当前仅 smoke）。
-- [x] 增加 CLI 多语言支持（`zh-CN`/`en-US`，支持 `--locale` 与 `COPAW_LOCALE`）。
-- [x] 扩展 `models config` 参数（`enabled/timeout_ms/headers/model_aliases`）并补齐 alias 链路。
+## 3. Contracts（契约）
+- [x] OpenAPI 契约与关键 schema 已补齐，契约 lint、契约测试与 SDK 生成流程已接入并可运行。
 
-## 4. Contracts（契约）
-- [x] 建立 `packages/contracts/openapi/openapi.yaml`。
-- [x] 建立契约测试（路径覆盖检查）。
-- [x] 建立最小 TS/JSONSchema 占位定义。
-- [x] 为关键请求/响应补全 schema 细节（字段级 required/enum/format）。
-- [x] 增加 OpenAPI lint（等价 lint 工具已接入 `tests/contract/openapi.lint.mjs`）。
-- [x] 增加基于 OpenAPI 的 SDK 自动生成流程。
-- [x] 补齐 models 系列接口 schema（`/models`、`/models/catalog`、`/models/{provider_id}/config`、`/models/active`）。
-- [x] 增加 provider 删除契约（`/models/{provider_id}`）与 `DeleteResult` schema。
+## 4. 测试与 CI/CD
+- [x] 已建立 unit / integration / e2e / contract 的分层测试能力与覆盖率门禁，关键闭环（chat/cron/workspace/provider）具备自动化验证。
+- [x] CI 已形成 `ci-fast` / `ci-full` / `nightly-live` 分层门禁，发布流水线支持 tag 到 artifact 与 release notes。
 
-## 5. 测试与质量
-- [x] Go 单测：runner。
-- [x] Go 集成测：chat 与 workspace 安全关键路径。
-- [x] CLI 单测：api-client。
-- [x] 契约测试：openapi 关键路径存在性。
-- [x] 端到端烟测：gateway + cli（chat 与 cron 基本闭环）。
-- [x] 增加 Gateway e2e：SSE 边界、错误码一致性、并发行为。
-- [x] 增加 CLI e2e：所有主命令成功/失败场景。
-- [x] 增加覆盖率基线（Go/TS）。
+## 5. 文档与交付
+- [x] `docs/v1-roadmap.md`、`docs/contracts.md`、本地开发文档、部署文档与发布模板已完成。
 
-## 6. CI / CD
-- [x] `ci-fast.yml`（PR 快检模板）。
-- [x] `ci-full.yml`（主分支全检模板）。
-- [x] `nightly-live.yml`（夜间 live 占位模板）。
-- [x] 将 CI 改为真实分层门禁（非占位命令）。
-- [x] 增加缓存策略与失败重试策略。
-- [x] 增加发布流水线（tag -> artifact -> release notes）。
+## 6. 实操验证（汇总）
+- [x] Go/TS 全量关键检查通过：`go test ./...`、`make gateway-coverage`、`pnpm -r lint/test/build`。
+- [x] 分模块验证通过：Web、CLI、Contracts、SDK 生成、Gateway provider 兼容性相关回归均已通过。
+- [x] 实际运行验证通过：Gateway 可启动并通过 `/healthz`、`/version`、`/chats`；CLI 可跑通 chat/cron；Web 静态服务可访问。
+- [x] Provider 管理策略验证通过：支持新增自定义 provider、内置/自定义 provider 删除、可删空；删掉激活 provider 后 `active_llm` 置空并返回空字符串字段。
+- [x] 2026-02-16 13:34 +0800 现场启动验证：执行 `make gateway` 成功，`/healthz` 返回 `{"ok":true}`，`/version` 返回 `{"version":"0.1.0"}`，`/chats` 返回 `[]`。
+- [x] 2026-02-16 13:35 +0800 联合启动验证：Gateway 持续监听 `127.0.0.1:8088`；Web 通过 `python3 -m http.server 5173` 提供静态页面，`HEAD /` 返回 `200 OK`。
+- [x] 2026-02-16 13:45 +0800 Web 样式修复验证：Provider 拟态弹窗从 Models 面板结构中剥离为全局层，去除拟态发光阴影；执行 `pnpm -C apps/web test -- --run test/smoke/shell.test.ts` 通过（12 tests）。
+- [x] 2026-02-16 13:46 +0800 Web 构建验证：执行 `pnpm -C apps/web build` 通过。
+- [x] 2026-02-16 13:53 +0800 Web 交互优化验证：Provider 配置中的 `headers` 与 `model_aliases` 改为可视化键值编辑（增删行）并接入提交流程；执行 `pnpm -C apps/web test` 与 `pnpm -C apps/web build` 均通过。
+- [x] 2026-02-16 13:55 +0800 Web 交互增强验证：编辑 Provider 时可从模型列表 `alias_of` 自动回填 `model_aliases` 可视化键值行；再次执行 `pnpm -C apps/web test` 与 `pnpm -C apps/web build` 均通过。
+- [x] 2026-02-16 14:03 +0800 模型配置扩展验证：新增 Provider 弹窗“自定义模型配置”可视化选项（模型 ID 增删行），提交时并入 `model_aliases`；后端补齐 custom provider alias 解析与模型展示；执行 `pnpm -C apps/web test`、`pnpm -C apps/web build`、`cd apps/gateway && go test ./internal/provider ./internal/app` 均通过。
+- [x] 2026-02-16 14:08 +0800 Provider 策略调整验证：移除内置 `demo` 提供商（默认 state 与迁移加载均不再保留），`/agent/process` 在未配置激活模型时改为内部 demo 回声兜底；执行 `cd apps/gateway && go test ./internal/provider ./internal/repo ./internal/app`、`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-16 14:16 +0800 Provider 拟态弹窗交互调整验证：`Provider ID` 改为 `Provider type` 下拉，仅可选择现有接口类型（`openai`、`openai Compatible`）；编辑模式保留原 provider_id 并锁定类型；执行 `pnpm -C apps/web test` 与 `pnpm -C apps/web build` 均通过。
+- [x] 2026-02-16 14:24 +0800 Provider 类型与删空回退修复验证：`/models/catalog` 新增 `provider_types`，Web 改为动态读取接口类型（不再硬编码）；补充“删除全部 provider 后 `/agent/process` 仍走 demo 回声兜底”回归测试；执行 `cd apps/gateway && go test ./internal/provider ./internal/app ./internal/repo`、`pnpm -C apps/web test`、`pnpm -C apps/web build`、`pnpm --filter @copaw-next/tests-contract run lint && pnpm --filter @copaw-next/tests-contract run test` 均通过。
+- [x] 2026-02-16 14:36 +0800 Web Provider 自定义模型联动修复验证：`openai` 类型下禁用并隐藏“自定义模型配置”，保存时仅对非内置 provider 提交 custom model IDs，避免“输入但看似未保存”的误导；执行 `pnpm -C apps/web test` 与 `pnpm -C apps/web build` 均通过。
+- [x] 2026-02-16 14:39 +0800 服务重启验证：已重启 Gateway（`make gateway`）与 Web（`python3 -m http.server 5173`）；`/healthz`、`/version` 与 Web `HEAD /` 均返回 200/正常结果。
+- [x] 2026-02-16 14:46 +0800 Web 模型与会话显示修复验证：Models 面板补回“激活模型”可视化入口（provider/model 下拉 + 手动覆盖 + `PUT /models/active`），并修复会话列表按钮布局为纵向分行；执行 `pnpm -C apps/web test` 与 `pnpm -C apps/web build` 均通过。
+- [x] 2026-02-16 14:49 +0800 服务重启验证：再次重启 Gateway（`make gateway`）与 Web（`python3 -m http.server 5173`）；`/healthz`、`/version` 与 Web `HEAD /` 均返回正常结果。
+- [x] 2026-02-16 14:51 +0800 Web e2e 覆盖补齐：新增 `apps/web/test/e2e/web-active-model-chat-flow.test.ts`，使用 jsdom 真实驱动页面流程（Models 设 active -> Chat 发送消息）并断言助手回复不含 `Echo:`；执行 `pnpm -C apps/web test`（13 tests）与 `pnpm -C apps/web build` 均通过。
 
-## 7. Web（控制台）
-- [x] 建立 `apps/web` 占位工程。
-- [x] 实现 Chat 页面（会话列表 + 消息区 + 发送 + SSE 展示）。
-- [x] 实现 Models/Envs/Skills/Workspace/Cron 页面最小操作面板。
-- [x] 增加前端 API 错误处理与提示规范。
-- [x] 增加前端测试（单测 + 冒烟）。
-- [x] 完成 Web 控制台中文化（界面文案、错误提示、时间/日期展示统一为中文语境）。
-- [x] 增加 Web 控制台多语言支持（`zh-CN`/`en-US`，界面切换与本地持久化）。
-- [x] Models 面板接入 `/models/catalog`（含 `/models` 回退），展示 default/alias/capabilities 关键信息。
-- [x] Models 面板支持 Provider 配置编辑（内置 Provider 下拉 + 展示名编辑 + 状态提示）。
-
-## 8. 文档与交付
-- [x] `docs/v1-roadmap.md`。
-- [x] `docs/contracts.md`。
-- [x] 增加本地开发文档（Gateway/CLI/Web 并行开发流程）。
-- [x] 增加部署文档（systemd/docker）。
-- [x] 增加版本发布说明模板（`v0.1.0-rc.1`）。
-
-## 9. 我已经完成的实操验证
-- [x] `go test ./...`（Gateway 通过）。
-- [x] `make gateway-coverage`（Go 覆盖率门禁通过，当前总覆盖约 49.9%，阈值 45%）。
-- [x] `cd apps/cli && pnpm run test:coverage`（CLI 覆盖率门禁通过，阈值：statements/lines 55%、functions 50%、branches 40%）。
-- [x] `pnpm -r lint`（通过）。
-- [x] `pnpm --filter @copaw-next/web run lint`（通过）。
-- [x] `pnpm --filter @copaw-next/web run test`（通过，单测+冒烟共 7 个用例）。
-- [x] `pnpm --filter @copaw-next/web run test`（通过，单测+冒烟共 12 个用例，含 i18n）。
-- [x] `pnpm -r test`（通过）。
-- [x] `pnpm -r build`（通过）。
-- [x] `pnpm -r test && pnpm -r build`（通过，2026-02-16 10:37:57 +0800 复跑）。
-- [x] `pnpm --filter @copaw-next/web run build`（通过）。
-- [x] `pnpm --filter @copaw-next/cli run lint && pnpm --filter @copaw-next/cli run test && pnpm --filter @copaw-next/cli run build`（通过，含 i18n 用例）。
-- [x] 实际启动 `COPAW_PORT=18088 go run ./cmd/gateway` 并验证 `/healthz`、`/version`、`/chats`。
-- [x] 使用 CLI 跑通 chat + cron 烟测闭环。
-- [x] 修复 `apps/gateway/.data/state.json` 空文件导致的启动失败，并成功启动 `go run ./cmd/gateway`（`127.0.0.1:8088`），验证 `/healthz` 与 `/version`。
-- [x] 启动 Web 控制台静态服务（`python3 -m http.server 18080 --directory apps/web/dist`），验证 `http://127.0.0.1:18080/` 可访问。
-- [x] `cd apps/gateway && go test ./...`（通过，含 provider catalog / alias / provider 限制与迁移测试）。
-- [x] `pnpm --filter @copaw-next/tests-contract run lint && pnpm --filter @copaw-next/tests-contract run test`（通过）。
-- [x] `pnpm --filter @copaw-next/web run lint && pnpm --filter @copaw-next/web run test && pnpm --filter @copaw-next/web run build`（通过）。
-- [x] `pnpm --filter @copaw-next/cli run lint && pnpm --filter @copaw-next/cli run test && pnpm --filter @copaw-next/cli run build`（通过；CLI e2e 现为 4 文件 9 用例）。
-- [x] `pnpm --filter @copaw-next/sdk-ts run generate`（通过，生成器判断产物与 OpenAPI 同步）。
-- [x] 本轮回归：`cd apps/gateway && go test ./...`、`pnpm --filter @copaw-next/tests-contract run lint && pnpm --filter @copaw-next/tests-contract run test`、`pnpm --filter @copaw-next/web run lint && pnpm --filter @copaw-next/web run test && pnpm --filter @copaw-next/web run build`（均通过）。
-- [x] 兼容性标记回归：Provider API 新增 `openai_compatible`，并验证前端以 `compatible` 后缀展示（`go test` + contract lint/test + web lint/test/build 均通过）。
-
-## 10. 当前未完成项与阻塞（2026-02-16）
-- 当前无阻塞未完成项。
+## 7. 当前未完成项与阻塞（2026-02-16 14:51:24 +0800）
+- [x] 设计并实现 provider 可删除方案（含内置 provider），并完成 catalog/active/default 语义调整：删除后从 `/models/catalog` 消失；删掉激活 provider 后 `active_llm` 置空。
+- [x] 风险已消除：删除全部 provider 后，`/agent/process` 在 `active_llm` 为空时走内部 demo 回声兜底；并有回归测试覆盖（`apps/gateway/internal/app/server_test.go`）。

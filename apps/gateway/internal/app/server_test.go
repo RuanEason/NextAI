@@ -18,6 +18,7 @@ import (
 
 	"copaw-next/apps/gateway/internal/config"
 	"copaw-next/apps/gateway/internal/domain"
+	"copaw-next/apps/gateway/internal/provider"
 	"copaw-next/apps/gateway/internal/repo"
 )
 
@@ -281,8 +282,21 @@ func TestProcessAgentOpenAIConfigured(t *testing.T) {
 	}
 }
 
-func TestModelsCatalogIncludesDefaults(t *testing.T) {
+func TestModelsCatalogReflectsStateProviders(t *testing.T) {
 	srv := newTestServer(t)
+
+	configProvider := `{"display_name":"My Custom Gateway","enabled":true}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/custom-openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config custom provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+
+	wDelete := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(wDelete, httptest.NewRequest(http.MethodDelete, "/models/openai", nil))
+	if wDelete.Code != http.StatusOK {
+		t.Fatalf("delete openai status=%d body=%s", wDelete.Code, wDelete.Body.String())
+	}
 
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/models/catalog", nil))
@@ -291,34 +305,48 @@ func TestModelsCatalogIncludesDefaults(t *testing.T) {
 	}
 
 	var out struct {
-		Providers []domain.ProviderInfo  `json:"providers"`
-		Defaults  map[string]string      `json:"defaults"`
-		ActiveLLM domain.ModelSlotConfig `json:"active_llm"`
+		Providers     []domain.ProviderInfo     `json:"providers"`
+		ProviderTypes []domain.ProviderTypeInfo `json:"provider_types"`
+		Defaults      map[string]string         `json:"defaults"`
+		ActiveLLM     domain.ModelSlotConfig    `json:"active_llm"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode catalog failed: %v body=%s", err, w.Body.String())
 	}
-	if len(out.Providers) < 2 {
-		t.Fatalf("expected at least 2 providers, got=%d", len(out.Providers))
+	if len(out.Providers) != 1 {
+		t.Fatalf("expected 1 provider from state, got=%d", len(out.Providers))
 	}
 	providersByID := map[string]domain.ProviderInfo{}
 	for _, item := range out.Providers {
 		providersByID[item.ID] = item
 	}
-	if providersByID["openai"].ID == "" {
-		t.Fatalf("expected openai provider in catalog")
+	if providersByID["openai"].ID != "" {
+		t.Fatalf("expected deleted openai provider not to appear in catalog")
 	}
-	if !providersByID["openai"].OpenAICompatible {
-		t.Fatalf("expected openai provider to be openai-compatible")
+	if providersByID["custom-openai"].ID == "" {
+		t.Fatalf("expected custom provider in catalog")
 	}
-	if providersByID["demo"].ID != "" && providersByID["demo"].OpenAICompatible {
-		t.Fatalf("expected demo provider to be non-compatible")
+	if !providersByID["custom-openai"].OpenAICompatible {
+		t.Fatalf("expected custom provider to be openai-compatible")
 	}
-	if out.Defaults["openai"] == "" {
-		t.Fatalf("expected openai default model, got=%v", out.Defaults["openai"])
+	if _, ok := out.Defaults["custom-openai"]; !ok {
+		t.Fatalf("expected custom default key to exist")
 	}
-	if out.ActiveLLM.ProviderID == "" || out.ActiveLLM.Model == "" {
-		t.Fatalf("expected active_llm, got=%+v", out.ActiveLLM)
+	if out.ActiveLLM.ProviderID != "" || out.ActiveLLM.Model != "" {
+		t.Fatalf("expected empty active_llm, got=%+v", out.ActiveLLM)
+	}
+	if len(out.ProviderTypes) == 0 {
+		t.Fatalf("expected provider_types not empty")
+	}
+	typesByID := map[string]domain.ProviderTypeInfo{}
+	for _, item := range out.ProviderTypes {
+		typesByID[item.ID] = item
+	}
+	if typesByID["openai"].ID == "" {
+		t.Fatalf("expected provider_type openai")
+	}
+	if typesByID[provider.AdapterOpenAICompatible].ID == "" {
+		t.Fatalf("expected provider_type %q", provider.AdapterOpenAICompatible)
 	}
 }
 
@@ -387,43 +415,141 @@ func TestConfigureProviderPersistsDisplayName(t *testing.T) {
 	}
 }
 
-func TestConfigureProviderRejectsUnsupportedProvider(t *testing.T) {
+func TestConfigureProviderCreatesCustomProvider(t *testing.T) {
+	srv := newTestServer(t)
+
+	configProvider := `{"enabled":true,"display_name":"Custom Provider"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/custom-openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config custom provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	if !strings.Contains(w1.Body.String(), `"id":"custom-openai"`) {
+		t.Fatalf("expected custom provider id in response, body=%s", w1.Body.String())
+	}
+
+	setActive := `{"provider_id":"custom-openai","model":"my-model"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active custom provider status=%d body=%s", w2.Code, w2.Body.String())
+	}
+	if !strings.Contains(w2.Body.String(), `"provider_id":"custom-openai"`) {
+		t.Fatalf("expected active provider updated, body=%s", w2.Body.String())
+	}
+}
+
+func TestSetActiveModelsResolvesAliasForCustomProvider(t *testing.T) {
+	srv := newTestServer(t)
+
+	configProvider := `{"enabled":true,"model_aliases":{"fast":"gpt-4o-mini"}}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/custom-openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config custom provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+
+	setActive := `{"provider_id":"custom-openai","model":"fast"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active custom provider status=%d body=%s", w2.Code, w2.Body.String())
+	}
+	if !strings.Contains(w2.Body.String(), `"model":"gpt-4o-mini"`) {
+		t.Fatalf("expected custom alias resolved model, body=%s", w2.Body.String())
+	}
+}
+
+func TestDeleteProviderAllowsDeleteAllAndClearsActive(t *testing.T) {
+	srv := newTestServer(t)
+
+	setActiveReq := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	setActiveW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(setActiveW, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActiveReq)))
+	if setActiveW.Code != http.StatusOK {
+		t.Fatalf("set active openai status=%d body=%s", setActiveW.Code, setActiveW.Body.String())
+	}
+
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodDelete, "/models/openai", nil))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("delete openai status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	if !strings.Contains(w1.Body.String(), `"deleted":true`) {
+		t.Fatalf("expected openai deleted=true, body=%s", w1.Body.String())
+	}
+
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/models/active", nil))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("get active models status=%d body=%s", w2.Code, w2.Body.String())
+	}
+	var activeOut struct {
+		ActiveLLM domain.ModelSlotConfig `json:"active_llm"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &activeOut); err != nil {
+		t.Fatalf("decode active models failed: %v body=%s", err, w2.Body.String())
+	}
+	if activeOut.ActiveLLM.ProviderID != "" || activeOut.ActiveLLM.Model != "" {
+		t.Fatalf("expected empty active_llm after deleting active provider, got=%+v", activeOut.ActiveLLM)
+	}
+
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodGet, "/models/catalog", nil))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("catalog status=%d body=%s", w3.Code, w3.Body.String())
+	}
+	var catalogOut struct {
+		Providers []domain.ProviderInfo `json:"providers"`
+	}
+	if err := json.Unmarshal(w3.Body.Bytes(), &catalogOut); err != nil {
+		t.Fatalf("decode catalog failed: %v body=%s", err, w3.Body.String())
+	}
+	if len(catalogOut.Providers) != 0 {
+		t.Fatalf("expected providers to be empty after deleting all, got=%d", len(catalogOut.Providers))
+	}
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello after delete"}]}],"session_id":"s-delete","user_id":"u-delete","channel":"console","stream":false}`
+	w4 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w4, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w4.Code != http.StatusOK {
+		t.Fatalf("process after deleting all providers status=%d body=%s", w4.Code, w4.Body.String())
+	}
+	if !strings.Contains(w4.Body.String(), `"Echo: hello after delete"`) {
+		t.Fatalf("expected demo echo fallback after deleting all providers, body=%s", w4.Body.String())
+	}
+}
+
+func TestDeleteProviderDeletesCustomProvider(t *testing.T) {
 	srv := newTestServer(t)
 
 	configProvider := `{"enabled":true}`
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/models/custom-openai/config", strings.NewReader(configProvider)))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/custom-openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config custom provider status=%d body=%s", w1.Code, w1.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"code":"provider_not_supported"`) {
-		t.Fatalf("unexpected body: %s", w.Body.String())
+
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodDelete, "/models/custom-openai", nil))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("delete custom provider status=%d body=%s", w2.Code, w2.Body.String())
+	}
+	if !strings.Contains(w2.Body.String(), `"deleted":true`) {
+		t.Fatalf("expected custom deleted=true, body=%s", w2.Body.String())
 	}
 }
 
-func TestDeleteProviderRejectsBuiltinProvider(t *testing.T) {
-	srv := newTestServer(t)
-
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/models/openai", nil))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), `"code":"builtin_provider_not_deletable"`) {
-		t.Fatalf("unexpected body: %s", w.Body.String())
-	}
-}
-
-func TestSetActiveModelsRejectsUnsupportedProvider(t *testing.T) {
+func TestSetActiveModelsRejectsProviderNotInState(t *testing.T) {
 	srv := newTestServer(t)
 
 	setActive := `{"provider_id":"custom-openai","model":"my-model"}`
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got=%d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"code":"provider_not_supported"`) {
+	if !strings.Contains(w.Body.String(), `"code":"provider_not_found"`) {
 		t.Fatalf("unexpected body: %s", w.Body.String())
 	}
 }

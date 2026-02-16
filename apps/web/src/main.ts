@@ -4,6 +4,7 @@ import { DEFAULT_LOCALE, getLocale, isWebMessageKey, setLocale, t } from "./i18n
 type Tone = "neutral" | "info" | "error";
 type TabKey = "chat" | "models" | "envs" | "skills" | "workspace" | "cron";
 type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
+type ProviderKVKind = "headers" | "aliases";
 
 interface ChatSpec {
   id: string;
@@ -75,19 +76,29 @@ interface ProviderInfo {
   current_base_url?: string;
 }
 
+interface ProviderTypeInfo {
+  id: string;
+  display_name: string;
+}
+
 interface ModelSlotConfig {
   provider_id: string;
   model: string;
 }
 
-interface ActiveModelsInfo {
-  active_llm: ModelSlotConfig;
-}
-
 interface ModelCatalogInfo {
   providers: ProviderInfo[];
+  provider_types?: ProviderTypeInfo[];
   defaults: Record<string, string>;
-  active_llm: ModelSlotConfig;
+  active_llm?: ModelSlotConfig;
+}
+
+interface ActiveModelsInfo {
+  active_llm?: ModelSlotConfig;
+}
+
+interface DeleteResult {
+  deleted: boolean;
 }
 
 interface EnvVar {
@@ -164,6 +175,7 @@ const DEFAULT_USER_ID = "demo-user";
 const DEFAULT_CHANNEL = "console";
 const SETTINGS_KEY = "copaw-next.web.chat.settings";
 const LOCALE_KEY = "copaw-next.web.locale";
+const BUILTIN_PROVIDER_IDS = new Set(["openai"]);
 const TABS: TabKey[] = ["chat", "models", "envs", "skills", "workspace", "cron"];
 
 const apiBaseInput = mustElement<HTMLInputElement>("api-base");
@@ -192,22 +204,32 @@ const messageInput = mustElement<HTMLTextAreaElement>("message-input");
 const sendButton = mustElement<HTMLButtonElement>("send-btn");
 
 const refreshModelsButton = mustElement<HTMLButtonElement>("refresh-models");
-const modelsProviderList = mustElement<HTMLUListElement>("models-provider-list");
-const modelsActiveText = mustElement<HTMLElement>("models-active-text");
+const modelsAddProviderButton = mustElement<HTMLButtonElement>("models-add-provider-btn");
 const modelsActiveForm = mustElement<HTMLFormElement>("models-active-form");
-const modelsProviderSelect = mustElement<HTMLSelectElement>("models-provider-select");
-const modelsModelSelect = mustElement<HTMLSelectElement>("models-model-select");
-const modelsModelInput = mustElement<HTMLInputElement>("models-model-input");
-const modelsConfigForm = mustElement<HTMLFormElement>("models-config-form");
-const modelsProviderIDSelect = mustElement<HTMLSelectElement>("models-provider-id-select");
+const modelsActiveProviderSelect = mustElement<HTMLSelectElement>("models-active-provider-select");
+const modelsActiveModelSelect = mustElement<HTMLSelectElement>("models-active-model-select");
+const modelsActiveModelManualInput = mustElement<HTMLInputElement>("models-active-model-manual-input");
+const modelsSetActiveButton = mustElement<HTMLButtonElement>("models-set-active-btn");
+const modelsActiveSummary = mustElement<HTMLElement>("models-active-summary");
+const modelsProviderList = mustElement<HTMLUListElement>("models-provider-list");
+const modelsProviderModal = mustElement<HTMLElement>("models-provider-modal");
+const modelsProviderModalTitle = mustElement<HTMLElement>("models-provider-modal-title");
+const modelsProviderModalCloseButton = mustElement<HTMLButtonElement>("models-provider-modal-close-btn");
+const modelsProviderForm = mustElement<HTMLFormElement>("models-provider-form");
+const modelsProviderTypeSelect = mustElement<HTMLSelectElement>("models-provider-type-select");
 const modelsProviderNameInput = mustElement<HTMLInputElement>("models-provider-name-input");
 const modelsProviderAPIKeyInput = mustElement<HTMLInputElement>("models-provider-api-key-input");
 const modelsProviderBaseURLInput = mustElement<HTMLInputElement>("models-provider-base-url-input");
 const modelsProviderTimeoutMSInput = mustElement<HTMLInputElement>("models-provider-timeout-ms-input");
 const modelsProviderEnabledInput = mustElement<HTMLInputElement>("models-provider-enabled-input");
-const modelsProviderHeadersInput = mustElement<HTMLTextAreaElement>("models-provider-headers-input");
-const modelsProviderAliasesInput = mustElement<HTMLTextAreaElement>("models-provider-aliases-input");
-const modelsProviderResetButton = mustElement<HTMLButtonElement>("models-provider-reset-btn");
+const modelsProviderHeadersRows = mustElement<HTMLElement>("models-provider-headers-rows");
+const modelsProviderHeadersAddButton = mustElement<HTMLButtonElement>("models-provider-headers-add-btn");
+const modelsProviderAliasesRows = mustElement<HTMLElement>("models-provider-aliases-rows");
+const modelsProviderAliasesAddButton = mustElement<HTMLButtonElement>("models-provider-aliases-add-btn");
+const modelsProviderCustomModelsField = mustElement<HTMLElement>("models-provider-custom-models-field");
+const modelsProviderCustomModelsRows = mustElement<HTMLElement>("models-provider-custom-models-rows");
+const modelsProviderCustomModelsAddButton = mustElement<HTMLButtonElement>("models-provider-custom-models-add-btn");
+const modelsProviderCancelButton = mustElement<HTMLButtonElement>("models-provider-cancel-btn");
 
 const refreshEnvsButton = mustElement<HTMLButtonElement>("refresh-envs");
 const envsTableBody = mustElement<HTMLTableSectionElement>("envs-table-body");
@@ -268,8 +290,14 @@ const state = {
   sending: false,
 
   providers: [] as ProviderInfo[],
+  providerTypes: [] as ProviderTypeInfo[],
   modelDefaults: {} as Record<string, string>,
-  activeModels: null as ActiveModelsInfo | null,
+  activeLLM: { provider_id: "", model: "" } as ModelSlotConfig,
+  providerModal: {
+    open: false,
+    mode: "create" as "create" | "edit",
+    editingProviderID: "",
+  },
   envs: [] as EnvVar[],
   skillsAll: [] as SkillSpec[],
   skillsAvailable: [] as SkillSpec[],
@@ -291,7 +319,7 @@ async function bootstrap(): Promise<void> {
   setWorkspaceDownloadLink();
   syncCronDispatchHint();
   ensureCronSessionID();
-  resetProviderForm();
+  resetProviderModalForm();
 
   setStatus(t("status.loadingChats"), "info");
   await reloadChats();
@@ -363,18 +391,77 @@ function bindEvents(): void {
     event.preventDefault();
     await setActiveModel();
   });
-  modelsProviderSelect.addEventListener("change", () => {
-    renderModelOptionsForProvider(modelsProviderSelect.value, modelsModelSelect.value);
+  modelsActiveProviderSelect.addEventListener("change", () => {
+    const providerID = modelsActiveProviderSelect.value.trim();
+    renderActiveModelOptions(providerID);
+    modelsActiveModelManualInput.value = "";
   });
-  modelsConfigForm.addEventListener("submit", async (event) => {
+  modelsAddProviderButton.addEventListener("click", () => {
+    openProviderModal("create");
+  });
+  modelsProviderForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await upsertProvider();
   });
-  modelsProviderIDSelect.addEventListener("change", () => {
-    populateProviderForm(modelsProviderIDSelect.value, true);
+  modelsProviderHeadersAddButton.addEventListener("click", () => {
+    appendProviderKVRow(modelsProviderHeadersRows, "headers");
   });
-  modelsProviderResetButton.addEventListener("click", () => {
-    resetProviderForm();
+  modelsProviderAliasesAddButton.addEventListener("click", () => {
+    appendProviderKVRow(modelsProviderAliasesRows, "aliases");
+  });
+  modelsProviderTypeSelect.addEventListener("change", () => {
+    syncProviderCustomModelsField(modelsProviderTypeSelect.value);
+  });
+  modelsProviderCustomModelsAddButton.addEventListener("click", () => {
+    appendCustomModelRow(modelsProviderCustomModelsRows);
+  });
+  modelsProviderForm.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const kvRemoveButton = target.closest<HTMLButtonElement>("button[data-kv-remove]");
+    if (kvRemoveButton) {
+      const kvRow = kvRemoveButton.closest(".kv-row");
+      if (kvRow) {
+        const container = kvRow.parentElement;
+        kvRow.remove();
+        if (container && container.children.length === 0) {
+          const kind = container.getAttribute("data-kv-kind");
+          if (kind === "headers" || kind === "aliases") {
+            appendProviderKVRow(container, kind);
+          }
+        }
+      }
+    }
+
+    const customRemoveButton = target.closest<HTMLButtonElement>("button[data-custom-model-remove]");
+    if (customRemoveButton) {
+      const customRow = customRemoveButton.closest(".custom-model-row");
+      if (!customRow) {
+        return;
+      }
+      const customContainer = customRow.parentElement;
+      customRow.remove();
+      if (customContainer && customContainer.children.length === 0) {
+        appendCustomModelRow(customContainer);
+      }
+    }
+  });
+  modelsProviderModalCloseButton.addEventListener("click", () => {
+    closeProviderModal();
+  });
+  modelsProviderCancelButton.addEventListener("click", () => {
+    closeProviderModal();
+  });
+  modelsProviderModal.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    if (target.closest("[data-modal-close=\"true\"]")) {
+      closeProviderModal();
+    }
   });
   modelsProviderList.addEventListener("click", async (event) => {
     const target = event.target;
@@ -391,7 +478,11 @@ function bindEvents(): void {
     }
     const action = button.dataset.providerAction;
     if (action === "edit") {
-      populateProviderForm(providerID);
+      openProviderModal("edit", providerID);
+      return;
+    }
+    if (action === "delete") {
+      await deleteProvider(providerID);
       return;
     }
   });
@@ -512,6 +603,7 @@ function applyLocaleToDocument(): void {
     }
   });
 
+  renderProviderTypeOptions();
   renderChatHeader();
   renderChatList();
   renderMessages();
@@ -928,8 +1020,9 @@ async function refreshModels(): Promise<void> {
   try {
     const result = await loadModelCatalog();
     state.providers = result.providers;
+    state.providerTypes = result.providerTypes;
     state.modelDefaults = result.defaults;
-    state.activeModels = { active_llm: result.active };
+    state.activeLLM = result.activeLLM;
     state.tabLoaded.models = true;
     renderModelsPanel();
     setStatus(
@@ -945,35 +1038,38 @@ async function refreshModels(): Promise<void> {
 
 async function loadModelCatalog(): Promise<{
   providers: ProviderInfo[];
+  providerTypes: ProviderTypeInfo[];
   defaults: Record<string, string>;
-  active: ModelSlotConfig;
+  activeLLM: ModelSlotConfig;
   source: "catalog" | "legacy";
 }> {
   try {
     const catalog = await requestJSON<ModelCatalogInfo>("/models/catalog");
     const providers = normalizeProviders(catalog.providers);
+    const providerTypes = normalizeProviderTypes(catalog.provider_types);
     return {
       providers,
+      providerTypes,
       defaults: normalizeDefaults(catalog.defaults, providers),
-      active: normalizeActiveModel(catalog.active_llm),
+      activeLLM: normalizeModelSlot(catalog.active_llm),
       source: "catalog",
     };
   } catch {
-    const [providersRaw, activeRaw] = await Promise.all([
-      requestJSON<ProviderInfo[]>("/models"),
-      requestJSON<ActiveModelsInfo>("/models/active"),
-    ]);
+    const providersRaw = await requestJSON<ProviderInfo[]>("/models");
     const providers = normalizeProviders(providersRaw);
+    const activeResult = await requestJSON<ActiveModelsInfo>("/models/active");
     return {
       providers,
+      providerTypes: fallbackProviderTypes(providers),
       defaults: buildDefaultMapFromProviders(providers),
-      active: normalizeActiveModel(activeRaw.active_llm),
+      activeLLM: normalizeModelSlot(activeResult.active_llm),
       source: "legacy",
     };
   }
 }
 
 function renderModelsPanel(): void {
+  renderActiveModelEditor();
   modelsProviderList.innerHTML = "";
   if (state.providers.length === 0) {
     appendEmptyItem(modelsProviderList, t("models.emptyProviders"));
@@ -1027,166 +1123,334 @@ function renderModelsPanel(): void {
       editButton.dataset.providerId = provider.id;
       editButton.textContent = t("models.editProvider");
 
-      actions.append(editButton);
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "danger-btn";
+      deleteButton.dataset.providerAction = "delete";
+      deleteButton.dataset.providerId = provider.id;
+      deleteButton.textContent = t("models.deleteProvider");
+
+      actions.append(editButton, deleteButton);
       item.append(title, enabledLine, keyStatus, defaultLine, baseURLLine, modelLine, actions);
       modelsProviderList.appendChild(item);
     }
   }
-
-  const activeLLM = state.activeModels?.active_llm;
-  modelsActiveText.textContent = activeLLM
-    ? t("models.activeSummary", {
-        providerId: activeLLM.provider_id,
-        model: activeLLM.model,
-      })
-    : t("common.none");
-
-  const preferredProvider = activeLLM?.provider_id || modelsProviderSelect.value || state.providers[0]?.id || "";
-  const preferredModel = activeLLM?.model || modelsModelSelect.value || state.modelDefaults[preferredProvider] || "";
-
-  modelsProviderSelect.innerHTML = "";
-  if (state.providers.length === 0) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = t("models.noProviderOption");
-    modelsProviderSelect.appendChild(option);
-  } else {
-    for (const provider of state.providers) {
-      const option = document.createElement("option");
-      option.value = provider.id;
-      option.textContent = formatProviderLabel(provider);
-      modelsProviderSelect.appendChild(option);
-    }
-  }
-
-  if (preferredProvider !== "") {
-    modelsProviderSelect.value = preferredProvider;
-  }
-  renderModelOptionsForProvider(modelsProviderSelect.value, preferredModel);
-  renderProviderConfigProviderOptions(modelsProviderIDSelect.value || preferredProvider);
-  populateProviderForm(modelsProviderIDSelect.value, true);
 }
 
-function renderProviderConfigProviderOptions(preferredProviderID = ""): void {
-  const fallbackProviderID = preferredProviderID || state.providers[0]?.id || "";
-  modelsProviderIDSelect.innerHTML = "";
+function renderActiveModelEditor(): void {
+  renderActiveProviderOptions();
   if (state.providers.length === 0) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = t("models.noProviderOption");
-    modelsProviderIDSelect.appendChild(option);
-    modelsProviderIDSelect.value = "";
+    modelsActiveModelSelect.innerHTML = "";
+    modelsActiveModelManualInput.value = "";
+    modelsActiveProviderSelect.disabled = true;
+    modelsActiveModelSelect.disabled = true;
+    modelsActiveModelManualInput.disabled = true;
+    modelsSetActiveButton.disabled = true;
+    modelsActiveSummary.textContent = t("models.activeSummary", {
+      providerId: t("common.none"),
+      model: t("common.none"),
+    });
     return;
   }
+
+  const hasActiveProvider = state.providers.some((provider) => provider.id === state.activeLLM.provider_id);
+  const selectedProviderID = hasActiveProvider ? state.activeLLM.provider_id : state.providers[0].id;
+  modelsActiveProviderSelect.value = selectedProviderID;
+  renderActiveModelOptions(selectedProviderID, state.activeLLM.model);
+
+  const selectedProvider = state.providers.find((provider) => provider.id === selectedProviderID);
+  const hasActiveModelInList =
+    selectedProvider?.models.some((model) => model.id === state.activeLLM.model) ?? false;
+  modelsActiveModelManualInput.value = hasActiveModelInList ? "" : state.activeLLM.model;
+
+  modelsActiveProviderSelect.disabled = false;
+  modelsActiveModelManualInput.disabled = false;
+  modelsSetActiveButton.disabled = false;
+  modelsActiveSummary.textContent = t("models.activeSummary", {
+    providerId: state.activeLLM.provider_id || t("common.none"),
+    model: state.activeLLM.model || t("common.none"),
+  });
+}
+
+function renderActiveProviderOptions(): void {
+  modelsActiveProviderSelect.innerHTML = "";
+  if (state.providers.length === 0) {
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    emptyOption.textContent = t("models.noProviderOption");
+    modelsActiveProviderSelect.appendChild(emptyOption);
+    return;
+  }
+
   for (const provider of state.providers) {
     const option = document.createElement("option");
     option.value = provider.id;
     option.textContent = formatProviderLabel(provider);
-    modelsProviderIDSelect.appendChild(option);
+    modelsActiveProviderSelect.appendChild(option);
   }
-  modelsProviderIDSelect.value = state.providers.some((item) => item.id === fallbackProviderID)
-    ? fallbackProviderID
-    : state.providers[0].id;
 }
 
-function renderModelOptionsForProvider(providerID: string, preferredModel = ""): void {
-  modelsModelSelect.innerHTML = "";
+function renderActiveModelOptions(providerID: string, preferredModel = ""): void {
+  modelsActiveModelSelect.innerHTML = "";
   const provider = state.providers.find((item) => item.id === providerID);
-  const modelIDs = dedupeModelIDs(provider?.models ?? [], state.modelDefaults[providerID]);
-
-  if (modelIDs.length === 0) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = t("models.noModelOption");
-    modelsModelSelect.appendChild(option);
-    modelsModelSelect.value = "";
+  const models = provider?.models ?? [];
+  if (models.length === 0) {
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    emptyOption.textContent = t("models.noModelOption");
+    modelsActiveModelSelect.appendChild(emptyOption);
+    modelsActiveModelSelect.disabled = true;
     return;
   }
 
-  for (const modelID of modelIDs) {
+  for (const model of models) {
     const option = document.createElement("option");
-    option.value = modelID;
-    option.textContent = modelID;
-    modelsModelSelect.appendChild(option);
+    option.value = model.id;
+    option.textContent = formatModelEntry(model);
+    modelsActiveModelSelect.appendChild(option);
   }
 
-  if (preferredModel !== "" && modelIDs.includes(preferredModel)) {
-    modelsModelSelect.value = preferredModel;
-  } else if (state.modelDefaults[providerID] && modelIDs.includes(state.modelDefaults[providerID])) {
-    modelsModelSelect.value = state.modelDefaults[providerID];
-  } else {
-    modelsModelSelect.value = modelIDs[0];
-  }
+  const preferred = preferredModel.trim();
+  const hasPreferred = preferred !== "" && models.some((model) => model.id === preferred);
+  const fallback = state.modelDefaults[providerID];
+  const hasFallback = typeof fallback === "string" && fallback !== "" && models.some((model) => model.id === fallback);
+  const selected = hasPreferred ? preferred : hasFallback ? fallback : models[0].id;
+  modelsActiveModelSelect.value = selected;
+  modelsActiveModelSelect.disabled = false;
 }
 
 async function setActiveModel(): Promise<void> {
   syncControlState();
-  const providerID = modelsProviderSelect.value.trim();
-  const model = modelsModelInput.value.trim() || modelsModelSelect.value.trim();
+  const providerID = modelsActiveProviderSelect.value.trim();
+  const modelFromProvider = modelsActiveModelSelect.value.trim();
+  const manualModel = modelsActiveModelManualInput.value.trim();
+  const modelID = manualModel || modelFromProvider;
 
-  if (providerID === "" || model === "") {
+  if (providerID === "" || modelID === "") {
     setStatus(t("error.providerAndModelRequired"), "error");
     return;
   }
 
   try {
-    await requestJSON<ActiveModelsInfo>("/models/active", {
+    const out = await requestJSON<ActiveModelsInfo>("/models/active", {
       method: "PUT",
       body: {
         provider_id: providerID,
-        model,
+        model: modelID,
       },
     });
-    modelsModelInput.value = "";
-    await refreshModels();
-    setStatus(t("status.activeModelUpdated", { providerId: providerID, model }), "info");
+    const active = normalizeModelSlot(out.active_llm);
+    state.activeLLM = active;
+    renderActiveModelEditor();
+    setStatus(
+      t("status.activeModelUpdated", {
+        providerId: active.provider_id || providerID,
+        model: active.model || modelID,
+      }),
+      "info",
+    );
   } catch (error) {
     setStatus(asErrorMessage(error), "error");
   }
 }
 
-function resetProviderForm(): void {
-  if (state.providers.length > 0) {
-    renderProviderConfigProviderOptions(state.providers[0].id);
-    populateProviderForm(modelsProviderIDSelect.value, true);
+function renderProviderTypeOptions(selectedType?: string): void {
+  const options = state.providerTypes.length > 0 ? state.providerTypes : fallbackProviderTypes(state.providers);
+  if (options.length === 0) {
+    modelsProviderTypeSelect.innerHTML = "";
     return;
   }
-  modelsProviderIDSelect.value = "";
+  const requestedType = normalizeProviderTypeValue(selectedType ?? modelsProviderTypeSelect.value);
+  const hasRequestedType = requestedType ? options.some((item) => item.id === requestedType) : false;
+  const activeType = hasRequestedType ? requestedType : options[0].id;
+  modelsProviderTypeSelect.innerHTML = "";
+  for (const option of options) {
+    const element = document.createElement("option");
+    element.value = option.id;
+    element.textContent = option.display_name;
+    modelsProviderTypeSelect.appendChild(element);
+  }
+  if (requestedType && !hasRequestedType) {
+    const selectedOption = document.createElement("option");
+    selectedOption.value = requestedType;
+    selectedOption.textContent = requestedType;
+    modelsProviderTypeSelect.appendChild(selectedOption);
+  }
+  modelsProviderTypeSelect.value = activeType;
+}
+
+function normalizeProviderTypeValue(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "openai-compatible") {
+    return normalized;
+  }
+  if (normalized === "openai") {
+    return normalized;
+  }
+  return normalized;
+}
+
+function providerSupportsCustomModels(providerTypeID: string): boolean {
+  const normalized = normalizeProviderTypeValue(providerTypeID);
+  return normalized !== "" && !BUILTIN_PROVIDER_IDS.has(normalized);
+}
+
+function syncProviderCustomModelsField(providerTypeID: string): void {
+  const enabled = providerSupportsCustomModels(providerTypeID);
+  modelsProviderCustomModelsField.hidden = !enabled;
+  modelsProviderCustomModelsAddButton.disabled = !enabled;
+  for (const input of Array.from(modelsProviderCustomModelsRows.querySelectorAll<HTMLInputElement>("input[data-custom-model-input=\"true\"]"))) {
+    input.disabled = !enabled;
+  }
+  if (!enabled) {
+    resetProviderCustomModelsEditor();
+  }
+}
+
+function resolveProviderType(provider: ProviderInfo): string {
+  if (provider.id === "openai") {
+    return "openai";
+  }
+  if (provider.openai_compatible) {
+    return "openai-compatible";
+  }
+  return provider.id;
+}
+
+function fallbackProviderTypes(providers: ProviderInfo[]): ProviderTypeInfo[] {
+  const seen = new Set<string>();
+  const out: ProviderTypeInfo[] = [];
+
+  const pushType = (id: string, displayName: string): void => {
+    const normalized = normalizeProviderTypeValue(id);
+    if (normalized === "" || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    out.push({
+      id: normalized,
+      display_name: displayName.trim() || providerTypeDisplayName(normalized),
+    });
+  };
+
+  pushType("openai", t("models.providerTypeOpenAI"));
+  pushType("openai-compatible", t("models.providerTypeOpenAICompatible"));
+
+  for (const provider of providers) {
+    if (provider.id === "openai") {
+      pushType("openai", t("models.providerTypeOpenAI"));
+      continue;
+    }
+    if (provider.openai_compatible) {
+      pushType("openai-compatible", t("models.providerTypeOpenAICompatible"));
+      continue;
+    }
+    pushType(provider.id, provider.display_name || provider.name || provider.id);
+  }
+
+  return out;
+}
+
+function normalizeProviderTypes(providerTypesRaw?: ProviderTypeInfo[]): ProviderTypeInfo[] {
+  if (!Array.isArray(providerTypesRaw)) {
+    return fallbackProviderTypes([]);
+  }
+  const seen = new Set<string>();
+  const out: ProviderTypeInfo[] = [];
+  for (const item of providerTypesRaw) {
+    const id = normalizeProviderTypeValue(item?.id ?? "");
+    if (id === "" || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    const displayName = (item?.display_name ?? "").trim() || providerTypeDisplayName(id);
+    out.push({
+      id,
+      display_name: displayName,
+    });
+  }
+  if (out.length === 0) {
+    return fallbackProviderTypes([]);
+  }
+  return out;
+}
+
+function providerTypeDisplayName(providerTypeID: string): string {
+  if (providerTypeID === "openai") {
+    return t("models.providerTypeOpenAI");
+  }
+  if (providerTypeID === "openai-compatible") {
+    return t("models.providerTypeOpenAICompatible");
+  }
+  return providerTypeID;
+}
+
+function resetProviderModalForm(): void {
+  renderProviderTypeOptions("openai");
+  modelsProviderTypeSelect.disabled = false;
   modelsProviderNameInput.value = "";
   modelsProviderAPIKeyInput.value = "";
   modelsProviderBaseURLInput.value = "";
   modelsProviderTimeoutMSInput.value = "";
   modelsProviderEnabledInput.checked = true;
-  modelsProviderHeadersInput.value = "{}";
-  modelsProviderAliasesInput.value = "{}";
+  resetProviderKVEditor(modelsProviderHeadersRows, "headers");
+  resetProviderKVEditor(modelsProviderAliasesRows, "aliases");
+  resetProviderCustomModelsEditor();
+  syncProviderCustomModelsField("openai");
 }
 
-function populateProviderForm(providerID: string, silent = false): void {
+function openProviderModal(mode: "create" | "edit", providerID = ""): void {
+  state.providerModal.mode = mode;
+  state.providerModal.open = true;
+  state.providerModal.editingProviderID = providerID;
+
+  if (mode === "create") {
+    resetProviderModalForm();
+    modelsProviderModalTitle.textContent = t("models.addProviderTitle");
+    modelsProviderTypeSelect.focus();
+  } else {
+    modelsProviderModalTitle.textContent = t("models.editProviderTitle");
+    populateProviderForm(providerID);
+    modelsProviderNameInput.focus();
+  }
+  modelsProviderModal.classList.remove("is-hidden");
+}
+
+function closeProviderModal(): void {
+  state.providerModal.open = false;
+  state.providerModal.editingProviderID = "";
+  modelsProviderModal.classList.add("is-hidden");
+}
+
+function populateProviderForm(providerID: string): void {
   const provider = state.providers.find((item) => item.id === providerID);
   if (!provider) {
-    if (!silent) {
-      setStatus(t("status.providerNotFound", { providerId: providerID }), "error");
-    }
+    setStatus(t("status.providerNotFound", { providerId: providerID }), "error");
     return;
   }
-  modelsProviderIDSelect.value = provider.id;
+  renderProviderTypeOptions(resolveProviderType(provider));
+  modelsProviderTypeSelect.disabled = true;
   modelsProviderNameInput.value = provider.display_name ?? provider.name ?? provider.id;
   modelsProviderAPIKeyInput.value = "";
   modelsProviderBaseURLInput.value = provider.current_base_url ?? "";
   modelsProviderEnabledInput.checked = provider.enabled !== false;
   modelsProviderTimeoutMSInput.value = "";
-  modelsProviderHeadersInput.value = "{}";
-  modelsProviderAliasesInput.value = "{}";
-  if (!silent) {
-    setStatus(t("status.providerLoadedForEdit", { providerId: provider.id }), "info");
-  }
+  resetProviderKVEditor(modelsProviderHeadersRows, "headers");
+  populateProviderAliasRows(provider.models);
+  populateProviderCustomModelsRows(provider);
+  syncProviderCustomModelsField(resolveProviderType(provider));
+  setStatus(t("status.providerLoadedForEdit", { providerId: provider.id }), "info");
 }
 
 async function upsertProvider(): Promise<void> {
   syncControlState();
-  const providerID = modelsProviderIDSelect.value.trim();
+  const selectedProviderType = normalizeProviderTypeValue(modelsProviderTypeSelect.value);
+  const providerID =
+    state.providerModal.mode === "edit" && state.providerModal.editingProviderID !== ""
+      ? state.providerModal.editingProviderID
+      : selectedProviderType;
   if (providerID === "") {
-    setStatus(t("error.providerIDRequired"), "error");
+    setStatus(t("error.providerTypeRequired"), "error");
     return;
   }
 
@@ -1203,9 +1467,7 @@ async function upsertProvider(): Promise<void> {
 
   let headers: Record<string, string> | undefined;
   try {
-    headers = parseOptionalStringMap(modelsProviderHeadersInput.value, {
-      invalidJSON: t("error.invalidProviderHeadersJSON"),
-      invalidMap: t("error.invalidProviderHeadersMap"),
+    headers = collectProviderKVMap(modelsProviderHeadersRows, {
       invalidKey: t("error.invalidProviderHeadersKey"),
       invalidValue: (key) => t("error.invalidProviderHeadersValue", { key }),
     });
@@ -1216,15 +1478,23 @@ async function upsertProvider(): Promise<void> {
 
   let aliases: Record<string, string> | undefined;
   try {
-    aliases = parseOptionalStringMap(modelsProviderAliasesInput.value, {
-      invalidJSON: t("error.invalidProviderAliasesJSON"),
-      invalidMap: t("error.invalidProviderAliasesMap"),
+    aliases = collectProviderKVMap(modelsProviderAliasesRows, {
       invalidKey: t("error.invalidProviderAliasesKey"),
       invalidValue: (key) => t("error.invalidProviderAliasesValue", { key }),
     });
   } catch (error) {
     setStatus(asErrorMessage(error), "error");
     return;
+  }
+
+  let customModels: string[] | undefined;
+  if (providerSupportsCustomModels(providerID)) {
+    try {
+      customModels = collectCustomModelIDs(modelsProviderCustomModelsRows);
+    } catch (error) {
+      setStatus(asErrorMessage(error), "error");
+      return;
+    }
   }
 
   const payload: Record<string, unknown> = {
@@ -1245,8 +1515,19 @@ async function upsertProvider(): Promise<void> {
   if (headers) {
     payload.headers = headers;
   }
+  const mergedAliases: Record<string, string> = {};
   if (aliases) {
-    payload.model_aliases = aliases;
+    Object.assign(mergedAliases, aliases);
+  }
+  if (customModels) {
+    for (const modelID of customModels) {
+      if (mergedAliases[modelID] === undefined) {
+        mergedAliases[modelID] = modelID;
+      }
+    }
+  }
+  if (Object.keys(mergedAliases).length > 0) {
+    payload.model_aliases = mergedAliases;
   }
 
   try {
@@ -1255,28 +1536,192 @@ async function upsertProvider(): Promise<void> {
       body: payload,
     });
     await refreshModels();
-    renderProviderConfigProviderOptions(out.id);
-    populateProviderForm(out.id, true);
+    closeProviderModal();
     modelsProviderAPIKeyInput.value = "";
-    setStatus(t("status.providerConfigSaved", { providerId: out.id }), "info");
+    setStatus(
+      t(state.providerModal.mode === "create" ? "status.providerCreated" : "status.providerUpdated", {
+        providerId: out.id,
+      }),
+      "info",
+    );
   } catch (error) {
     setStatus(asErrorMessage(error), "error");
   }
 }
 
-function parseOptionalStringMap(
-  raw: string,
+async function deleteProvider(providerID: string): Promise<void> {
+  if (!window.confirm(t("models.deleteProviderConfirm", { providerId: providerID }))) {
+    return;
+  }
+  syncControlState();
+  try {
+    const out = await requestJSON<DeleteResult>(`/models/${encodeURIComponent(providerID)}`, {
+      method: "DELETE",
+    });
+    await refreshModels();
+    if (state.providerModal.open && state.providerModal.editingProviderID === providerID) {
+      closeProviderModal();
+    }
+    setStatus(t(out.deleted ? "status.providerDeleted" : "status.providerDeleteSkipped", { providerId: providerID }), "info");
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+function resetProviderKVEditor(container: HTMLElement, kind: ProviderKVKind): void {
+  container.innerHTML = "";
+  appendProviderKVRow(container, kind);
+}
+
+function resetProviderCustomModelsEditor(): void {
+  modelsProviderCustomModelsRows.innerHTML = "";
+  appendCustomModelRow(modelsProviderCustomModelsRows);
+}
+
+function populateProviderAliasRows(models: ModelInfo[]): void {
+  const aliases = new Map<string, string>();
+  for (const model of models) {
+    const alias = model.id.trim();
+    const target = (model.alias_of ?? "").trim();
+    if (alias === "" || target === "") {
+      continue;
+    }
+    aliases.set(alias, target);
+  }
+  modelsProviderAliasesRows.innerHTML = "";
+  if (aliases.size === 0) {
+    appendProviderKVRow(modelsProviderAliasesRows, "aliases");
+    return;
+  }
+  for (const [alias, target] of aliases.entries()) {
+    appendProviderKVRow(modelsProviderAliasesRows, "aliases", alias, target);
+  }
+}
+
+function populateProviderCustomModelsRows(provider: ProviderInfo): void {
+  resetProviderCustomModelsEditor();
+  if (BUILTIN_PROVIDER_IDS.has(provider.id)) {
+    return;
+  }
+
+  const customModelIDs = provider.models
+    .filter((item) => (item.alias_of ?? "").trim() === "")
+    .map((item) => item.id.trim())
+    .filter((item) => item !== "");
+  if (customModelIDs.length === 0) {
+    return;
+  }
+
+  modelsProviderCustomModelsRows.innerHTML = "";
+  for (const modelID of customModelIDs) {
+    appendCustomModelRow(modelsProviderCustomModelsRows, modelID);
+  }
+}
+
+function appendProviderKVRow(container: HTMLElement, kind: ProviderKVKind, key = "", value = ""): void {
+  const row = document.createElement("div");
+  row.className = "kv-row";
+
+  const keyInput = document.createElement("input");
+  keyInput.type = "text";
+  keyInput.className = "kv-key-input";
+  keyInput.value = key;
+  keyInput.setAttribute("data-kv-field", "key");
+  keyInput.setAttribute("data-i18n-placeholder", "models.kvKeyPlaceholder");
+  keyInput.placeholder = t("models.kvKeyPlaceholder");
+
+  const valueInput = document.createElement("input");
+  valueInput.type = "text";
+  valueInput.className = "kv-value-input";
+  valueInput.value = value;
+  valueInput.setAttribute("data-kv-field", "value");
+  valueInput.setAttribute("data-i18n-placeholder", kind === "headers" ? "models.kvHeaderValuePlaceholder" : "models.kvAliasValuePlaceholder");
+  valueInput.placeholder = kind === "headers" ? t("models.kvHeaderValuePlaceholder") : t("models.kvAliasValuePlaceholder");
+
+  const removeButton = document.createElement("button");
+  removeButton.type = "button";
+  removeButton.className = "secondary-btn";
+  removeButton.setAttribute("data-i18n", "models.removeKVRow");
+  removeButton.textContent = t("models.removeKVRow");
+  removeButton.dataset.kvRemove = "true";
+
+  row.append(keyInput, valueInput, removeButton);
+  container.appendChild(row);
+}
+
+function appendCustomModelRow(container: HTMLElement, modelID = ""): void {
+  const row = document.createElement("div");
+  row.className = "custom-model-row";
+
+  const modelInput = document.createElement("input");
+  modelInput.type = "text";
+  modelInput.className = "custom-model-input";
+  modelInput.value = modelID;
+  modelInput.setAttribute("data-custom-model-input", "true");
+  modelInput.setAttribute("data-i18n-placeholder", "models.customModelPlaceholder");
+  modelInput.placeholder = t("models.customModelPlaceholder");
+
+  const removeButton = document.createElement("button");
+  removeButton.type = "button";
+  removeButton.className = "secondary-btn";
+  removeButton.setAttribute("data-i18n", "models.removeKVRow");
+  removeButton.textContent = t("models.removeKVRow");
+  removeButton.dataset.customModelRemove = "true";
+
+  row.append(modelInput, removeButton);
+  container.appendChild(row);
+}
+
+function collectCustomModelIDs(container: HTMLElement): string[] | undefined {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const input of Array.from(container.querySelectorAll<HTMLInputElement>("input[data-custom-model-input=\"true\"]"))) {
+    const modelID = input.value.trim();
+    if (modelID === "" || seen.has(modelID)) {
+      continue;
+    }
+    seen.add(modelID);
+    out.push(modelID);
+  }
+  if (out.length === 0) {
+    return undefined;
+  }
+  return out;
+}
+
+function collectProviderKVMap(
+  container: HTMLElement,
   messages: {
-    invalidJSON: string;
-    invalidMap: string;
     invalidKey: string;
     invalidValue: (key: string) => string;
   },
 ): Record<string, string> | undefined {
-  if (raw.trim() === "") {
+  const out: Record<string, string> = {};
+
+  for (const row of Array.from(container.querySelectorAll<HTMLElement>(".kv-row"))) {
+    const keyInput = row.querySelector<HTMLInputElement>("input[data-kv-field=\"key\"]");
+    const valueInput = row.querySelector<HTMLInputElement>("input[data-kv-field=\"value\"]");
+    if (!keyInput || !valueInput) {
+      continue;
+    }
+    const key = keyInput.value.trim();
+    const value = valueInput.value.trim();
+    if (key === "" && value === "") {
+      continue;
+    }
+    if (key === "") {
+      throw new Error(messages.invalidKey);
+    }
+    if (value === "") {
+      throw new Error(messages.invalidValue(key));
+    }
+    out[key] = value;
+  }
+
+  if (Object.keys(out).length === 0) {
     return undefined;
   }
-  return parseEnvMap(raw, messages);
+  return out;
 }
 
 async function refreshEnvs(): Promise<void> {
@@ -1791,30 +2236,11 @@ function buildDefaultMapFromProviders(providers: ProviderInfo[]): Record<string,
   return out;
 }
 
-function normalizeActiveModel(active: ModelSlotConfig | undefined): ModelSlotConfig {
+function normalizeModelSlot(raw?: ModelSlotConfig): ModelSlotConfig {
   return {
-    provider_id: active?.provider_id ?? "",
-    model: active?.model ?? "",
+    provider_id: raw?.provider_id?.trim() ?? "",
+    model: raw?.model?.trim() ?? "",
   };
-}
-
-function dedupeModelIDs(models: ModelInfo[], defaultModelID?: string): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  if (defaultModelID && defaultModelID.trim() !== "") {
-    const normalized = defaultModelID.trim();
-    seen.add(normalized);
-    out.push(normalized);
-  }
-  for (const model of models) {
-    const modelID = model.id.trim();
-    if (modelID === "" || seen.has(modelID)) {
-      continue;
-    }
-    seen.add(modelID);
-    out.push(modelID);
-  }
-  return out;
 }
 
 function formatModelEntry(model: ModelInfo): string {

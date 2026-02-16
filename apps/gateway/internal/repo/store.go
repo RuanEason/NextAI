@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"copaw-next/apps/gateway/internal/domain"
-	"copaw-next/apps/gateway/internal/provider"
 )
 
 type ProviderSetting struct {
@@ -67,10 +66,9 @@ func defaultState(dataDir string) State {
 		CronJobs:   map[string]domain.CronJobSpec{},
 		CronStates: map[string]domain.CronJobState{},
 		Providers: map[string]ProviderSetting{
-			"demo":   defaultProviderSetting(),
 			"openai": defaultProviderSetting(),
 		},
-		ActiveLLM: domain.ModelSlotConfig{ProviderID: "demo", Model: "demo-chat"},
+		ActiveLLM: domain.ModelSlotConfig{},
 		Envs:      map[string]string{},
 		Skills:    map[string]domain.SkillSpec{},
 		Channels: domain.ChannelConfigMap{
@@ -115,58 +113,35 @@ func (s *Store) load() error {
 	}
 	if state.Providers == nil {
 		state.Providers = map[string]ProviderSetting{
-			"demo":   defaultProviderSetting(),
 			"openai": defaultProviderSetting(),
 		}
 	}
 	normalizedProviders := map[string]ProviderSetting{}
-	activeProviderID := normalizeProviderID(state.ActiveLLM.ProviderID)
-	activeCustomSetting := ProviderSetting{}
-	activeCustomExists := false
 
 	for rawID, setting := range state.Providers {
 		id := normalizeProviderID(rawID)
 		if id == "" {
 			continue
 		}
-		normalizeProviderSetting(&setting)
-		if !provider.IsBuiltinProviderID(id) {
-			if id == activeProviderID {
-				activeCustomSetting = setting
-				activeCustomExists = true
-			}
+		if id == "demo" {
 			continue
 		}
+		normalizeProviderSetting(&setting)
 		normalizedProviders[id] = setting
 	}
-	if _, ok := normalizedProviders["demo"]; !ok {
-		normalizedProviders["demo"] = defaultProviderSetting()
-	}
-	if _, ok := normalizedProviders["openai"]; !ok {
-		normalizedProviders["openai"] = defaultProviderSetting()
-	}
-	if !provider.IsBuiltinProviderID(activeProviderID) {
-		activeProviderID = "openai"
-		state.ActiveLLM.Model = ""
-		if activeCustomExists {
-			openaiSetting := normalizedProviders["openai"]
-			mergeProviderSetting(&openaiSetting, activeCustomSetting)
-			normalizeProviderSetting(&openaiSetting)
-			normalizedProviders["openai"] = openaiSetting
-		}
-	}
-	if activeProviderID == "" {
-		activeProviderID = "demo"
-	}
-	state.ActiveLLM.ProviderID = activeProviderID
-	if strings.TrimSpace(state.ActiveLLM.Model) == "" {
-		defaultModel := provider.DefaultModelID(state.ActiveLLM.ProviderID)
-		if defaultModel == "" {
-			defaultModel = provider.DefaultModelID("demo")
-		}
-		state.ActiveLLM.Model = defaultModel
-	}
 	state.Providers = normalizedProviders
+	activeProviderID := normalizeProviderID(state.ActiveLLM.ProviderID)
+	activeModelID := strings.TrimSpace(state.ActiveLLM.Model)
+	if activeProviderID == "" || activeModelID == "" {
+		state.ActiveLLM = domain.ModelSlotConfig{}
+	} else if _, ok := normalizedProviders[activeProviderID]; !ok {
+		state.ActiveLLM = domain.ModelSlotConfig{}
+	} else {
+		state.ActiveLLM = domain.ModelSlotConfig{
+			ProviderID: activeProviderID,
+			Model:      activeModelID,
+		}
+	}
 	if state.Envs == nil {
 		state.Envs = map[string]string{}
 	}

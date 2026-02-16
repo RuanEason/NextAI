@@ -16,8 +16,13 @@ describe("web shell smoke", () => {
 
     expect(html).toContain('id="panel-chat"');
     expect(html).toContain('id="panel-models"');
-    expect(html).toContain('id="models-config-form"');
-    expect(html).toContain('id="models-provider-id-select"');
+    expect(html).toContain('id="models-active-form"');
+    expect(html).toContain('id="models-active-provider-select"');
+    expect(html).toContain('id="models-active-model-select"');
+    expect(html).toContain('id="models-set-active-btn"');
+    expect(html).toContain('id="models-add-provider-btn"');
+    expect(html).toContain('id="models-provider-form"');
+    expect(html).toContain('id="models-provider-type-select"');
     expect(html).toContain('id="models-provider-name-input"');
     expect(html).toContain('id="panel-envs"');
     expect(html).toContain('id="panel-skills"');

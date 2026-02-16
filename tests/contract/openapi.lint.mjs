@@ -33,6 +33,7 @@ const modelSlotConfig = schemas.ModelSlotConfig;
 const activeModelsInfo = schemas.ActiveModelsInfo;
 const modelInfo = schemas.ModelInfo;
 const providerInfo = schemas.ProviderInfo;
+const providerTypeInfo = schemas.ProviderTypeInfo;
 const providerConfigPatch = schemas.ProviderConfigPatch;
 const deleteResult = schemas.DeleteResult;
 const modelCatalogInfo = schemas.ModelCatalogInfo;
@@ -103,10 +104,13 @@ expect(providerInfo?.properties?.openai_compatible?.type === "boolean", "Provide
 expect(hasRequired(providerInfo, "openai_compatible"), "ProviderInfo.required 必须包含 openai_compatible");
 expect(providerInfo?.properties?.enabled?.type === "boolean", "ProviderInfo.enabled 必须是 boolean");
 expect(hasRequired(providerInfo, "models"), "ProviderInfo.required 必须包含 models");
+expect(hasRequired(providerTypeInfo, "id"), "ProviderTypeInfo.required 必须包含 id");
+expect(hasRequired(providerTypeInfo, "display_name"), "ProviderTypeInfo.required 必须包含 display_name");
 expect(providerConfigPatch?.properties?.timeout_ms?.minimum === 0, "ProviderConfigPatch.timeout_ms 必须设置 minimum=0");
 expect(deleteResult?.properties?.deleted?.type === "boolean", "DeleteResult.deleted 必须是 boolean");
 expect(hasRequired(deleteResult, "deleted"), "DeleteResult.required 必须包含 deleted");
 expect(hasRequired(modelCatalogInfo, "providers"), "ModelCatalogInfo.required 必须包含 providers");
+expect(hasRequired(modelCatalogInfo, "provider_types"), "ModelCatalogInfo.required 必须包含 provider_types");
 expect(hasRequired(modelCatalogInfo, "defaults"), "ModelCatalogInfo.required 必须包含 defaults");
 expect(hasRequired(modelCatalogInfo, "active_llm"), "ModelCatalogInfo.required 必须包含 active_llm");
 
