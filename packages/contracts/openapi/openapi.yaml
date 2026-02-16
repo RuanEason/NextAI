@@ -220,6 +220,19 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ProviderInfo' }
+  /models/{provider_id}:
+    delete:
+      parameters:
+        - in: path
+          name: provider_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeleteResult' }
   /models/active:
     get:
       responses:
@@ -529,6 +542,8 @@ components:
       properties:
         id: { type: string, minLength: 1 }
         name: { type: string, minLength: 1 }
+        display_name: { type: string, minLength: 1 }
+        openai_compatible: { type: boolean }
         api_key_prefix: { type: string, minLength: 1 }
         models:
           type: array
@@ -539,12 +554,13 @@ components:
         current_api_key: { type: string }
         current_base_url: { type: string }
       required:
-        [id, name, api_key_prefix, models, allow_custom_base_url, enabled, has_api_key, current_api_key, current_base_url]
+        [id, name, display_name, openai_compatible, api_key_prefix, models, allow_custom_base_url, enabled, has_api_key, current_api_key, current_base_url]
     ProviderConfigPatch:
       type: object
       properties:
         api_key: { type: string }
         base_url: { type: string }
+        display_name: { type: string }
         enabled: { type: boolean }
         headers:
           type: object
@@ -553,6 +569,11 @@ components:
         model_aliases:
           type: object
           additionalProperties: { type: string }
+    DeleteResult:
+      type: object
+      properties:
+        deleted: { type: boolean }
+      required: [deleted]
     ModelCatalogInfo:
       type: object
       properties:

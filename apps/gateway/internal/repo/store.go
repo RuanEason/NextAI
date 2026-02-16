@@ -5,14 +5,17 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"copaw-next/apps/gateway/internal/domain"
+	"copaw-next/apps/gateway/internal/provider"
 )
 
 type ProviderSetting struct {
 	APIKey       string            `json:"api_key"`
 	BaseURL      string            `json:"base_url"`
+	DisplayName  string            `json:"display_name,omitempty"`
 	Enabled      *bool             `json:"enabled,omitempty"`
 	Headers      map[string]string `json:"headers,omitempty"`
 	TimeoutMS    int               `json:"timeout_ms,omitempty"`
@@ -112,34 +115,58 @@ func (s *Store) load() error {
 	}
 	if state.Providers == nil {
 		state.Providers = map[string]ProviderSetting{
-			"demo": defaultProviderSetting(),
+			"demo":   defaultProviderSetting(),
+			"openai": defaultProviderSetting(),
 		}
 	}
-	if _, ok := state.Providers["demo"]; !ok {
-		state.Providers["demo"] = defaultProviderSetting()
-	}
-	if _, ok := state.Providers["openai"]; !ok {
-		state.Providers["openai"] = defaultProviderSetting()
-	}
-	for id, setting := range state.Providers {
-		if setting.Enabled == nil {
-			enabled := true
-			setting.Enabled = &enabled
+	normalizedProviders := map[string]ProviderSetting{}
+	activeProviderID := normalizeProviderID(state.ActiveLLM.ProviderID)
+	activeCustomSetting := ProviderSetting{}
+	activeCustomExists := false
+
+	for rawID, setting := range state.Providers {
+		id := normalizeProviderID(rawID)
+		if id == "" {
+			continue
 		}
-		if setting.Headers == nil {
-			setting.Headers = map[string]string{}
+		normalizeProviderSetting(&setting)
+		if !provider.IsBuiltinProviderID(id) {
+			if id == activeProviderID {
+				activeCustomSetting = setting
+				activeCustomExists = true
+			}
+			continue
 		}
-		if setting.ModelAliases == nil {
-			setting.ModelAliases = map[string]string{}
+		normalizedProviders[id] = setting
+	}
+	if _, ok := normalizedProviders["demo"]; !ok {
+		normalizedProviders["demo"] = defaultProviderSetting()
+	}
+	if _, ok := normalizedProviders["openai"]; !ok {
+		normalizedProviders["openai"] = defaultProviderSetting()
+	}
+	if !provider.IsBuiltinProviderID(activeProviderID) {
+		activeProviderID = "openai"
+		state.ActiveLLM.Model = ""
+		if activeCustomExists {
+			openaiSetting := normalizedProviders["openai"]
+			mergeProviderSetting(&openaiSetting, activeCustomSetting)
+			normalizeProviderSetting(&openaiSetting)
+			normalizedProviders["openai"] = openaiSetting
 		}
-		state.Providers[id] = setting
 	}
-	if state.ActiveLLM.ProviderID == "" {
-		state.ActiveLLM.ProviderID = "demo"
+	if activeProviderID == "" {
+		activeProviderID = "demo"
 	}
-	if state.ActiveLLM.Model == "" {
-		state.ActiveLLM.Model = "demo-chat"
+	state.ActiveLLM.ProviderID = activeProviderID
+	if strings.TrimSpace(state.ActiveLLM.Model) == "" {
+		defaultModel := provider.DefaultModelID(state.ActiveLLM.ProviderID)
+		if defaultModel == "" {
+			defaultModel = provider.DefaultModelID("demo")
+		}
+		state.ActiveLLM.Model = defaultModel
 	}
+	state.Providers = normalizedProviders
 	if state.Envs == nil {
 		state.Envs = map[string]string{}
 	}
@@ -207,5 +234,72 @@ func defaultProviderSetting() ProviderSetting {
 		Enabled:      &enabled,
 		Headers:      map[string]string{},
 		ModelAliases: map[string]string{},
+	}
+}
+
+func normalizeProviderID(providerID string) string {
+	return strings.ToLower(strings.TrimSpace(providerID))
+}
+
+func normalizeProviderSetting(setting *ProviderSetting) {
+	if setting == nil {
+		return
+	}
+	setting.DisplayName = strings.TrimSpace(setting.DisplayName)
+	setting.APIKey = strings.TrimSpace(setting.APIKey)
+	setting.BaseURL = strings.TrimSpace(setting.BaseURL)
+	if setting.Enabled == nil {
+		enabled := true
+		setting.Enabled = &enabled
+	}
+	if setting.Headers == nil {
+		setting.Headers = map[string]string{}
+	}
+	if setting.ModelAliases == nil {
+		setting.ModelAliases = map[string]string{}
+	}
+}
+
+func mergeProviderSetting(dst *ProviderSetting, src ProviderSetting) {
+	if dst == nil {
+		return
+	}
+	if src.DisplayName != "" {
+		dst.DisplayName = src.DisplayName
+	}
+	if src.APIKey != "" {
+		dst.APIKey = src.APIKey
+	}
+	if src.BaseURL != "" {
+		dst.BaseURL = src.BaseURL
+	}
+	if src.Enabled != nil {
+		enabled := *src.Enabled
+		dst.Enabled = &enabled
+	}
+	if len(src.Headers) > 0 {
+		dst.Headers = map[string]string{}
+		for key, value := range src.Headers {
+			k := strings.TrimSpace(key)
+			v := strings.TrimSpace(value)
+			if k == "" || v == "" {
+				continue
+			}
+			dst.Headers[k] = v
+		}
+	}
+	if src.TimeoutMS > 0 {
+		dst.TimeoutMS = src.TimeoutMS
+	}
+	if len(src.ModelAliases) > 0 {
+		dst.ModelAliases = map[string]string{}
+		for key, value := range src.ModelAliases {
+			alias := strings.TrimSpace(key)
+			modelID := strings.TrimSpace(value)
+			if alias == "" || modelID == "" {
+				continue
+			}
+			dst.ModelAliases[alias] = modelID
+		}
 	}
 }

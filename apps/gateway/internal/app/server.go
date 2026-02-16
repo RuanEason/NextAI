@@ -141,6 +141,7 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/", s.listProviders)
 		r.Get("/catalog", s.getModelCatalog)
 		r.Put("/{provider_id}/config", s.configureProvider)
+		r.Delete("/{provider_id}", s.deleteProvider)
 		r.Get("/active", s.getActiveModels)
 		r.Put("/active", s.setActiveModels)
 	})
@@ -1375,9 +1376,14 @@ func (s *Server) configureProvider(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_provider_id", "provider_id is required", nil)
 		return
 	}
+	if !provider.IsBuiltinProviderID(providerID) {
+		writeErr(w, http.StatusBadRequest, "provider_not_supported", "provider is not supported", nil)
+		return
+	}
 	var body struct {
 		APIKey       *string            `json:"api_key"`
 		BaseURL      *string            `json:"base_url"`
+		DisplayName  *string            `json:"display_name"`
 		Enabled      *bool              `json:"enabled"`
 		Headers      *map[string]string `json:"headers"`
 		TimeoutMS    *int               `json:"timeout_ms"`
@@ -1406,6 +1412,9 @@ func (s *Server) configureProvider(w http.ResponseWriter, r *http.Request) {
 		if body.BaseURL != nil {
 			setting.BaseURL = strings.TrimSpace(*body.BaseURL)
 		}
+		if body.DisplayName != nil {
+			setting.DisplayName = strings.TrimSpace(*body.DisplayName)
+		}
 		if body.Enabled != nil {
 			enabled := *body.Enabled
 			setting.Enabled = &enabled
@@ -1429,6 +1438,40 @@ func (s *Server) configureProvider(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
+	providerID := normalizeProviderID(chi.URLParam(r, "provider_id"))
+	if providerID == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_provider_id", "provider_id is required", nil)
+		return
+	}
+	if provider.IsBuiltinProviderID(providerID) {
+		writeErr(w, http.StatusBadRequest, "builtin_provider_not_deletable", "builtin provider cannot be deleted", nil)
+		return
+	}
+
+	deleted := false
+	if err := s.store.Write(func(st *repo.State) error {
+		if normalizeProviderID(st.ActiveLLM.ProviderID) == providerID {
+			return errors.New("active_provider_in_use")
+		}
+		for key := range st.Providers {
+			if normalizeProviderID(key) == providerID {
+				delete(st.Providers, key)
+				deleted = true
+			}
+		}
+		return nil
+	}); err != nil {
+		if err.Error() == "active_provider_in_use" {
+			writeErr(w, http.StatusBadRequest, "active_provider_in_use", "active provider cannot be deleted", nil)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"deleted": deleted})
+}
+
 func (s *Server) getActiveModels(w http.ResponseWriter, _ *http.Request) {
 	var out domain.ActiveModelsInfo
 	s.store.Read(func(st *repo.State) {
@@ -1447,6 +1490,10 @@ func (s *Server) setActiveModels(w http.ResponseWriter, r *http.Request) {
 	body.Model = strings.TrimSpace(body.Model)
 	if body.ProviderID == "" || body.Model == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_model_slot", "provider_id and model are required", nil)
+		return
+	}
+	if !provider.IsBuiltinProviderID(body.ProviderID) {
+		writeErr(w, http.StatusBadRequest, "provider_not_supported", "provider is not supported", nil)
 		return
 	}
 	var out domain.ModelSlotConfig
@@ -1942,29 +1989,18 @@ func (s *Server) collectProviderCatalog() ([]domain.ProviderInfo, map[string]str
 
 	s.store.Read(func(st *repo.State) {
 		active = st.ActiveLLM
-		ids := map[string]struct{}{}
 		settingsByID := map[string]repo.ProviderSetting{}
 
-		for _, id := range provider.ListBuiltinProviderIDs() {
-			ids[id] = struct{}{}
-		}
 		for rawID, setting := range st.Providers {
 			id := normalizeProviderID(rawID)
-			if id == "" {
+			if id == "" || !provider.IsBuiltinProviderID(id) {
 				continue
 			}
 			normalizeProviderSetting(&setting)
 			settingsByID[id] = setting
-			ids[id] = struct{}{}
 		}
 
-		ordered := make([]string, 0, len(ids))
-		for id := range ids {
-			ordered = append(ordered, id)
-		}
-		sort.Strings(ordered)
-
-		for _, id := range ordered {
+		for _, id := range provider.ListBuiltinProviderIDs() {
 			setting := settingsByID[id]
 			normalizeProviderSetting(&setting)
 			out = append(out, buildProviderInfo(id, setting))
@@ -1981,6 +2017,8 @@ func buildProviderInfo(providerID string, setting repo.ProviderSetting) domain.P
 	return domain.ProviderInfo{
 		ID:                 providerID,
 		Name:               spec.Name,
+		DisplayName:        resolveProviderDisplayName(setting, spec.Name),
+		OpenAICompatible:   provider.ResolveAdapter(providerID) == provider.AdapterOpenAICompatible,
 		APIKeyPrefix:       spec.APIKeyPrefix,
 		Models:             provider.ResolveModels(providerID, setting.ModelAliases),
 		AllowCustomBaseURL: spec.AllowCustomBaseURL,
@@ -2008,6 +2046,13 @@ func resolveProviderBaseURL(providerID string, setting repo.ProviderSetting) str
 	return provider.ResolveProvider(providerID).DefaultBaseURL
 }
 
+func resolveProviderDisplayName(setting repo.ProviderSetting, defaultName string) string {
+	if displayName := strings.TrimSpace(setting.DisplayName); displayName != "" {
+		return displayName
+	}
+	return strings.TrimSpace(defaultName)
+}
+
 func providerEnvPrefix(providerID string) string {
 	return provider.EnvPrefix(providerID)
 }
@@ -2027,6 +2072,9 @@ func normalizeProviderSetting(setting *repo.ProviderSetting) {
 	if setting == nil {
 		return
 	}
+	setting.DisplayName = strings.TrimSpace(setting.DisplayName)
+	setting.APIKey = strings.TrimSpace(setting.APIKey)
+	setting.BaseURL = strings.TrimSpace(setting.BaseURL)
 	if setting.Enabled == nil {
 		enabled := true
 		setting.Enabled = &enabled

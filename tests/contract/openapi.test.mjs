@@ -14,6 +14,7 @@ const requiredPaths = [
   "/cron/jobs",
   "/models",
   "/models/catalog",
+  "/models/{provider_id}",
   "/envs",
   "/skills",
   "/workspace/upload",

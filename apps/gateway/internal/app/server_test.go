@@ -301,6 +301,19 @@ func TestModelsCatalogIncludesDefaults(t *testing.T) {
 	if len(out.Providers) < 2 {
 		t.Fatalf("expected at least 2 providers, got=%d", len(out.Providers))
 	}
+	providersByID := map[string]domain.ProviderInfo{}
+	for _, item := range out.Providers {
+		providersByID[item.ID] = item
+	}
+	if providersByID["openai"].ID == "" {
+		t.Fatalf("expected openai provider in catalog")
+	}
+	if !providersByID["openai"].OpenAICompatible {
+		t.Fatalf("expected openai provider to be openai-compatible")
+	}
+	if providersByID["demo"].ID != "" && providersByID["demo"].OpenAICompatible {
+		t.Fatalf("expected demo provider to be non-compatible")
+	}
 	if out.Defaults["openai"] == "" {
 		t.Fatalf("expected openai default model, got=%v", out.Defaults["openai"])
 	}
@@ -351,40 +364,67 @@ func TestSetActiveModelsRejectsDisabledProvider(t *testing.T) {
 	}
 }
 
-func TestProcessAgentCustomProviderOpenAICompatible(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"custom provider reply"}}]}`))
-	}))
-	defer mock.Close()
-
+func TestConfigureProviderPersistsDisplayName(t *testing.T) {
 	srv := newTestServer(t)
 
-	configProvider := `{"api_key":"sk-custom","base_url":"` + mock.URL + `","enabled":true}`
+	configProvider := `{"display_name":"My OpenAI Gateway","enabled":true}`
 	w1 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/custom-openai/config", strings.NewReader(configProvider)))
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
 	if w1.Code != http.StatusOK {
 		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
 	}
+	if !strings.Contains(w1.Body.String(), `"display_name":"My OpenAI Gateway"`) {
+		t.Fatalf("expected display_name persisted, body=%s", w1.Body.String())
+	}
+
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/models", nil))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("list providers status=%d body=%s", w2.Code, w2.Body.String())
+	}
+	if !strings.Contains(w2.Body.String(), `"display_name":"My OpenAI Gateway"`) {
+		t.Fatalf("expected display_name in catalog, body=%s", w2.Body.String())
+	}
+}
+
+func TestConfigureProviderRejectsUnsupportedProvider(t *testing.T) {
+	srv := newTestServer(t)
+
+	configProvider := `{"enabled":true}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/models/custom-openai/config", strings.NewReader(configProvider)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"provider_not_supported"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestDeleteProviderRejectsBuiltinProvider(t *testing.T) {
+	srv := newTestServer(t)
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/models/openai", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"builtin_provider_not_deletable"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestSetActiveModelsRejectsUnsupportedProvider(t *testing.T) {
+	srv := newTestServer(t)
 
 	setActive := `{"provider_id":"custom-openai","model":"my-model"}`
-	w2 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
-	if w2.Code != http.StatusOK {
-		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
 	}
-
-	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello"}]}],"session_id":"s1","user_id":"u1","channel":"console","stream":false}`
-	w3 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
-	if w3.Code != http.StatusOK {
-		t.Fatalf("process status=%d body=%s", w3.Code, w3.Body.String())
-	}
-	if !strings.Contains(w3.Body.String(), `"custom provider reply"`) {
-		t.Fatalf("unexpected body: %s", w3.Body.String())
+	if !strings.Contains(w.Body.String(), `"code":"provider_not_supported"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
 	}
 }
 

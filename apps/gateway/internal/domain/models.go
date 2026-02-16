@@ -139,6 +139,8 @@ type ModelLimit struct {
 type ProviderInfo struct {
 	ID                 string      `json:"id"`
 	Name               string      `json:"name"`
+	DisplayName        string      `json:"display_name"`
+	OpenAICompatible   bool        `json:"openai_compatible"`
 	APIKeyPrefix       string      `json:"api_key_prefix"`
 	Models             []ModelInfo `json:"models"`
 	AllowCustomBaseURL bool        `json:"allow_custom_base_url"`

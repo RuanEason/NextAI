@@ -120,6 +120,15 @@ func ResolveProvider(providerID string) ProviderSpec {
 	}
 }
 
+func IsBuiltinProviderID(providerID string) bool {
+	id := strings.ToLower(strings.TrimSpace(providerID))
+	if id == "" {
+		return false
+	}
+	_, ok := builtinProviders[id]
+	return ok
+}
+
 func ResolveAdapter(providerID string) string {
 	return ResolveProvider(providerID).Adapter
 }

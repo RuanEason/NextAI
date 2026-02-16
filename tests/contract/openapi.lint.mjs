@@ -34,6 +34,7 @@ const activeModelsInfo = schemas.ActiveModelsInfo;
 const modelInfo = schemas.ModelInfo;
 const providerInfo = schemas.ProviderInfo;
 const providerConfigPatch = schemas.ProviderConfigPatch;
+const deleteResult = schemas.DeleteResult;
 const modelCatalogInfo = schemas.ModelCatalogInfo;
 const apiKeyAuth = spec?.components?.securitySchemes?.ApiKeyAuth;
 
@@ -96,9 +97,15 @@ expect(hasRequired(modelSlotConfig, "model"), "ModelSlotConfig.required 必须�
 expect(hasRequired(activeModelsInfo, "active_llm"), "ActiveModelsInfo.required 必须包含 active_llm");
 expect(hasRequired(modelInfo, "id"), "ModelInfo.required 必须包含 id");
 expect(hasRequired(modelInfo, "name"), "ModelInfo.required 必须包含 name");
+expect(providerInfo?.properties?.display_name?.minLength === 1, "ProviderInfo.display_name 必须设置 minLength=1");
+expect(hasRequired(providerInfo, "display_name"), "ProviderInfo.required 必须包含 display_name");
+expect(providerInfo?.properties?.openai_compatible?.type === "boolean", "ProviderInfo.openai_compatible 必须是 boolean");
+expect(hasRequired(providerInfo, "openai_compatible"), "ProviderInfo.required 必须包含 openai_compatible");
 expect(providerInfo?.properties?.enabled?.type === "boolean", "ProviderInfo.enabled 必须是 boolean");
 expect(hasRequired(providerInfo, "models"), "ProviderInfo.required 必须包含 models");
 expect(providerConfigPatch?.properties?.timeout_ms?.minimum === 0, "ProviderConfigPatch.timeout_ms 必须设置 minimum=0");
+expect(deleteResult?.properties?.deleted?.type === "boolean", "DeleteResult.deleted 必须是 boolean");
+expect(hasRequired(deleteResult, "deleted"), "DeleteResult.required 必须包含 deleted");
 expect(hasRequired(modelCatalogInfo, "providers"), "ModelCatalogInfo.required 必须包含 providers");
 expect(hasRequired(modelCatalogInfo, "defaults"), "ModelCatalogInfo.required 必须包含 defaults");
 expect(hasRequired(modelCatalogInfo, "active_llm"), "ModelCatalogInfo.required 必须包含 active_llm");
