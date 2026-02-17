@@ -72,6 +72,117 @@ func newDocsAITestPath(t *testing.T, prefix string) (string, string) {
 	return rel, abs
 }
 
+func writeWebFixture(t *testing.T, baseDir string) string {
+	t.Helper()
+	webDir := filepath.Join(baseDir, "web")
+	assetDir := filepath.Join(webDir, "assets")
+	if err := os.MkdirAll(assetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	index := "<!doctype html><html><body><div id=\"app\">nextai</div><script src=\"/assets/app.js\"></script></body></html>"
+	if err := os.WriteFile(filepath.Join(webDir, "index.html"), []byte(index), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(assetDir, "app.js"), []byte("console.log('ok');"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return webDir
+}
+
+func TestFindRepoRootFallsBackToCurrentWorkingDirectoryWithoutGit(t *testing.T) {
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(originalWD)
+	})
+
+	root, err := findRepoRoot()
+	if err != nil {
+		t.Fatalf("findRepoRoot returned error: %v", err)
+	}
+	if root != tmp {
+		t.Fatalf("findRepoRoot=%q, want %q", root, tmp)
+	}
+}
+
+func TestHandlerServesWebStaticFiles(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	tmp := t.TempDir()
+	webDir := writeWebFixture(t, tmp)
+	srv, err := NewServer(config.Config{
+		Host:    "127.0.0.1",
+		Port:    "0",
+		DataDir: tmp,
+		WebDir:  webDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	rootW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rootW, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rootW.Code != http.StatusOK {
+		t.Fatalf("root status=%d body=%s", rootW.Code, rootW.Body.String())
+	}
+	if !strings.Contains(rootW.Body.String(), "nextai") {
+		t.Fatalf("unexpected root body: %s", rootW.Body.String())
+	}
+
+	assetW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(assetW, httptest.NewRequest(http.MethodGet, "/assets/app.js", nil))
+	if assetW.Code != http.StatusOK {
+		t.Fatalf("asset status=%d body=%s", assetW.Code, assetW.Body.String())
+	}
+	if !strings.Contains(assetW.Body.String(), "console.log") {
+		t.Fatalf("unexpected asset body: %s", assetW.Body.String())
+	}
+
+	spaW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(spaW, httptest.NewRequest(http.MethodGet, "/any/deep/link", nil))
+	if spaW.Code != http.StatusOK {
+		t.Fatalf("spa fallback status=%d body=%s", spaW.Code, spaW.Body.String())
+	}
+	if !strings.Contains(spaW.Body.String(), "nextai") {
+		t.Fatalf("unexpected spa fallback body: %s", spaW.Body.String())
+	}
+}
+
+func TestHandlerWebStaticIsPublicWhenAPIKeyEnabled(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	tmp := t.TempDir()
+	webDir := writeWebFixture(t, tmp)
+	srv, err := NewServer(config.Config{
+		Host:    "127.0.0.1",
+		Port:    "0",
+		DataDir: tmp,
+		APIKey:  "secret",
+		WebDir:  webDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	rootW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rootW, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rootW.Code != http.StatusOK {
+		t.Fatalf("root with api key status=%d body=%s", rootW.Code, rootW.Body.String())
+	}
+
+	chatsW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(chatsW, httptest.NewRequest(http.MethodGet, "/chats", nil))
+	if chatsW.Code != http.StatusUnauthorized {
+		t.Fatalf("chats without key status=%d body=%s", chatsW.Code, chatsW.Body.String())
+	}
+}
+
 type streamingProbeWriter struct {
 	header      http.Header
 	status      int

@@ -9,6 +9,7 @@ type Config struct {
 	Port    string
 	DataDir string
 	APIKey  string
+	WebDir  string
 }
 
 func Load() Config {
@@ -25,5 +26,6 @@ func Load() Config {
 		dataDir = ".data"
 	}
 	apiKey := os.Getenv("NEXTAI_API_KEY")
-	return Config{Host: host, Port: port, DataDir: dataDir, APIKey: apiKey}
+	webDir := os.Getenv("NEXTAI_WEB_DIR")
+	return Config{Host: host, Port: port, DataDir: dataDir, APIKey: apiKey, WebDir: webDir}
 }

@@ -75,14 +75,26 @@ python3 -m http.server 5173 --bind 127.0.0.1 --directory dist
 
 ### 方式一：下载总包（推荐）
 
-1. 下载并解压（示例版本：`v0.1.0-rc.3`）
+1. 下载并解压（示例版本：`v0.1.0-rc.4`）
+
+Linux:
 
 ```bash
-export NEXTAI_VERSION=v0.1.0-rc.3
+export NEXTAI_VERSION=v0.1.0-rc.4
 mkdir -p /opt/nextai && cd /opt/nextai
 curl -fL -o nextai-release-linux-amd64.tar.gz \
   "https://github.com/ruan222123126/NextAI/releases/download/${NEXTAI_VERSION}/nextai-release-linux-amd64.tar.gz"
 tar -xzf nextai-release-linux-amd64.tar.gz
+```
+
+Windows (PowerShell):
+
+```powershell
+$env:NEXTAI_VERSION = "v0.1.0-rc.4"
+New-Item -ItemType Directory -Force C:\nextai | Out-Null
+Set-Location C:\nextai
+Invoke-WebRequest -Uri "https://github.com/ruan222123126/NextAI/releases/download/$env:NEXTAI_VERSION/nextai-release-windows-amd64.zip" -OutFile "nextai-release-windows-amd64.zip"
+Expand-Archive -Path .\nextai-release-windows-amd64.zip -DestinationPath . -Force
 ```
 
 2. 准备配置（复制模板后直接改值）
@@ -182,16 +194,30 @@ node agent.js "打开 https://example.com，读取标题"
 
 3. 启动 Gateway（会自动加载当前目录 `.env`）
 
+Linux:
+
 ```bash
 cd /opt/nextai
 chmod +x gateway-linux-amd64
 ./gateway-linux-amd64
 ```
 
+Windows (PowerShell):
+
+```powershell
+Set-Location C:\nextai
+.\gateway-windows-amd64.exe
+```
+
 也可以指定自定义配置路径：
 
 ```bash
 NEXTAI_ENV_FILE=/etc/nextai/gateway.env ./gateway-linux-amd64
+```
+
+```powershell
+$env:NEXTAI_ENV_FILE = "C:\nextai\gateway.env"
+.\gateway-windows-amd64.exe
 ```
 
 4. 启动 CLI（需要 Node.js `22+`）
@@ -202,26 +228,32 @@ node cli/index.js --help
 node cli/index.js chats list --api-base http://127.0.0.1:8088
 ```
 
-5. 启动 Web（静态文件）（web页面中配置你的模型和qq渠道）
+5. 打开 Web 控制台（由 Gateway 直接托管，无需额外启动 Python）
 
-```bash
-cd /opt/nextai
-python3 -m http.server 5173 --bind 0.0.0.0 --directory web
-```
+- 默认访问：`http://127.0.0.1:8088/`
+- 若你把前端目录放在别处，设置 `NEXTAI_WEB_DIR=/your/path/to/web`（Windows: `C:\path\to\web`）
 
 ### 方式二：按单独产物下载
 
 - `gateway-linux-amd64`：Gateway 可执行文件（Linux amd64）
+- `gateway-windows-amd64.exe`：Gateway 可执行文件（Windows amd64）
 - `cli-dist.tar.gz`：CLI/TUI 构建产物（解压后用 `node index.js ...` 运行）
 - `web-dist.tar.gz`：Web 静态产物（解压后用 Nginx/Caddy/`http.server` 托管）
+- `nextai-release-linux-amd64.tar.gz`：Linux 总包（gateway + cli + web + `.env.example`）
+- `nextai-release-windows-amd64.zip`：Windows 总包（gateway + cli + web + `.env.example`）
 
 这些产物都在 GitHub Release 附件中。
+
+> 注意：`v0.1.0-rc.5` 及更早版本的总包未包含 `docs/AI` 目录，因此 Web 配置页可能看不到 `docs/AI/AGENTS.md`、`docs/AI/ai-tools.md`。
+> 临时补救：把仓库里的 `docs/AI` 整个目录复制到部署目录同路径（例如 `/opt/nextai/docs/AI` 或 `C:\nextai\docs\AI`）。
+> 从后续版本开始，`nextai-release-linux-amd64.tar.gz` 和 `nextai-release-windows-amd64.zip` 会默认包含 `docs/AI`。
 
 ## 配置说明
 
 - `NEXTAI_HOST`：Gateway 监听地址（默认 `127.0.0.1`）
 - `NEXTAI_PORT`：Gateway 端口（默认 `8088`）
 - `NEXTAI_DATA_DIR`：数据目录（默认 `.data`）
+- `NEXTAI_WEB_DIR`：可选，Web 静态目录（默认 `web`，即在当前工作目录下查找）
 - `NEXTAI_API_KEY`：可选，设置后启用 API Key 鉴权
 
 当启用 `NEXTAI_API_KEY` 后，客户端可通过 `X-API-Key` 或 `Authorization: Bearer <key>` 访问 Gateway。
