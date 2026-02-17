@@ -1,6 +1,6 @@
 # NextAI TODO
 
-更新时间：2026-02-17 19:18:44 +0800
+更新时间：2026-02-17 19:47:01 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`。
@@ -29,6 +29,22 @@
 - [x] `docs/v1-roadmap.md`、`docs/contracts.md`、本地开发文档、部署文档与发布模板已完成。
 
 ## 6. 实操验证（汇总）
+- [x] 2026-02-17 19:47 +0800 发版前验证完成：执行 `cd apps/gateway && go test ./...` 与 `cd browser-agent-poc && pnpm run check` 均通过，满足本轮提交与发布前质量门禁。
+- [x] 2026-02-17 19:47 +0800 工作区统一提交准备完成：确认当前改动包含 Gateway `search/browser/.env` 支持、`browser-agent-poc` 目录与 README/Contracts/AI 文档同步，且未纳入本地敏感 `.env`。
+- [x] 2026-02-17 19:47 +0800 计划发布版本：基于已存在 `v0.1.0-rc.3`，本轮按序发布 `v0.1.0-rc.4`（通过 tag 触发 GitHub Release 自动附加总包）。
+- [x] 2026-02-17 19:41 +0800 Browser 文档回滚：按用户要求恢复 `docs/AI/ai-tools.md` 的 `browser` 工具条目与调用示例，不再删除 browser 能力说明。
+- [x] 2026-02-17 19:41 +0800 AGENTS 规则回滚：移除 `docs/AI/AGENTS.md` 中“默认禁用 browser 工具”条目，恢复为原规则集合。
+- [x] 2026-02-17 19:41 +0800 Browser 注释补充：在 `docs/AI/ai-tools.md` 的 `browser` 工具描述补充“若无须 AI 操作浏览器可不配置此能力”。
+- [x] 2026-02-17 19:37 +0800 README 接口兼容性提示强化：在浏览器代理配置段落明确“仅支持 OpenAI-compatible API 接口”，并补充“非兼容协议需先通过兼容层/网关转换”说明。
+- [x] 2026-02-17 19:36 +0800 README 浏览器部署说明细化：新增 `browser-agent-poc` 单独部署原因、目录要求、依赖安装、Playwright 运行时安装、Gateway 联动与自检步骤。
+- [x] 2026-02-17 19:36 +0800 README 浏览器模型配置细化：补充 `browser-agent-poc/.env` 中 `MODEL_API_KEY`、`MODEL_BASE_URL`、`MODEL_NAME` 的字段解释与示例。
+- [x] 2026-02-17 19:35 +0800 README 搜索 API 说明增强：明确 `search` 支持 `serpapi/tavily/brave` 三种 provider，补充各自环境变量映射、`NEXTAI_SEARCH_DEFAULT_PROVIDER` 留空自动选择规则、`items[].provider` 显式指定规则。
+- [x] 2026-02-17 19:35 +0800 README 浏览器依赖说明增强：补充 `browser` 需要单独部署 `browser-agent-poc`，并明确其 `.env` 必填 `MODEL_API_KEY`、`MODEL_BASE_URL`、`MODEL_NAME`。
+- [x] 2026-02-17 19:31 +0800 发布版配置简化：Gateway 启动新增自动读取 `.env`（默认当前目录），并支持 `NEXTAI_ENV_FILE=/path/to/env` 指定配置文件，保留“已有系统环境变量优先，不被 `.env` 覆盖”语义。
+- [x] 2026-02-17 19:31 +0800 配套测试与文档同步：新增 `apps/gateway/cmd/gateway/envfile_test.go` 覆盖默认 `.env`、显式路径、缺失文件三类场景；更新 `README.md` 发布版步骤与 `.env.example` 说明；发布流水线总包新增 `.env.example`（`.github/workflows/release.yml`）。
+- [x] 2026-02-17 19:31 +0800 验证通过：执行 `cd apps/gateway && go test ./...` 通过。
+- [x] 2026-02-17 19:24 +0800 已按用户提供密钥写入本地 `.env`：创建并更新 `NEXTAI_ENABLE_SEARCH_TOOL=true`、`NEXTAI_SEARCH_DEFAULT_PROVIDER=tavily`、`NEXTAI_SEARCH_TAVILY_KEY=<已填写>`，用于启用内置搜索插件的 Tavily provider。
+- [x] 2026-02-17 19:24 +0800 脱敏校验通过：`grep` 检查确认上述 3 个键存在（密钥值以掩码展示，未在日志明文输出）。
 - [x] 2026-02-17 19:18 +0800 README 发布版指南补齐：新增“使用发布版（Release）”章节，包含总包 `nextai-release-linux-amd64.tar.gz` 的下载、解压、Gateway/CLI/Web 启动步骤，以及单独产物说明。
 - [x] 2026-02-17 19:18 +0800 文档一致性检查：发布版章节与当前 release 产物命名保持一致（`gateway-linux-amd64`、`cli-dist.tar.gz`、`web-dist.tar.gz`、`nextai-release-linux-amd64.tar.gz`）。
 - [x] 2026-02-17 19:17 +0800 发布清理完成：已删除远端与本地 tag `v0.1.0-rc.2`（`git push origin :refs/tags/v0.1.0-rc.2`、`git tag -d v0.1.0-rc.2`），仅保留 `v0.1.0-rc.3`。
