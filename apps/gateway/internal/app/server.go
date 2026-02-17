@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -65,6 +66,7 @@ const (
 	qqChannelName         = "qq"
 	channelSourceHeader   = "X-NextAI-Source"
 	qqInboundPath         = "/channels/qq/inbound"
+	defaultWebDirName     = "web"
 )
 
 var errCronJobNotFound = errors.New("cron_job_not_found")
@@ -191,80 +193,87 @@ func (s *Server) Handler() http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(observability.RequestID)
 	r.Use(observability.Logging)
-	r.Use(observability.APIKey(s.cfg.APIKey))
 	r.Use(cors)
 
 	r.Get("/version", s.handleVersion)
 	r.Get("/healthz", s.handleHealthz)
 
-	r.Route("/chats", func(r chi.Router) {
-		r.Get("/", s.listChats)
-		r.Post("/", s.createChat)
-		r.Post("/batch-delete", s.batchDeleteChats)
-		r.Get("/{chat_id}", s.getChat)
-		r.Put("/{chat_id}", s.updateChat)
-		r.Delete("/{chat_id}", s.deleteChat)
+	r.Group(func(api chi.Router) {
+		api.Use(observability.APIKey(s.cfg.APIKey))
+
+		api.Route("/chats", func(r chi.Router) {
+			r.Get("/", s.listChats)
+			r.Post("/", s.createChat)
+			r.Post("/batch-delete", s.batchDeleteChats)
+			r.Get("/{chat_id}", s.getChat)
+			r.Put("/{chat_id}", s.updateChat)
+			r.Delete("/{chat_id}", s.deleteChat)
+		})
+
+		api.Post("/agent/process", s.processAgent)
+		api.Post("/channels/qq/inbound", s.processQQInbound)
+		api.Get("/channels/qq/state", s.getQQInboundState)
+
+		api.Route("/cron", func(r chi.Router) {
+			r.Get("/jobs", s.listCronJobs)
+			r.Post("/jobs", s.createCronJob)
+			r.Get("/jobs/{job_id}", s.getCronJob)
+			r.Put("/jobs/{job_id}", s.updateCronJob)
+			r.Delete("/jobs/{job_id}", s.deleteCronJob)
+			r.Post("/jobs/{job_id}/pause", s.pauseCronJob)
+			r.Post("/jobs/{job_id}/resume", s.resumeCronJob)
+			r.Post("/jobs/{job_id}/run", s.runCronJob)
+			r.Get("/jobs/{job_id}/state", s.getCronJobState)
+		})
+
+		api.Route("/models", func(r chi.Router) {
+			r.Get("/", s.listProviders)
+			r.Get("/catalog", s.getModelCatalog)
+			r.Put("/{provider_id}/config", s.configureProvider)
+			r.Delete("/{provider_id}", s.deleteProvider)
+			r.Get("/active", s.getActiveModels)
+			r.Put("/active", s.setActiveModels)
+		})
+
+		api.Route("/envs", func(r chi.Router) {
+			r.Get("/", s.listEnvs)
+			r.Put("/", s.putEnvs)
+			r.Delete("/{key}", s.deleteEnv)
+		})
+
+		api.Route("/skills", func(r chi.Router) {
+			r.Get("/", s.listSkills)
+			r.Get("/available", s.listAvailableSkills)
+			r.Post("/batch-disable", s.batchDisableSkills)
+			r.Post("/batch-enable", s.batchEnableSkills)
+			r.Post("/", s.createSkill)
+			r.Post("/{skill_name}/disable", s.disableSkill)
+			r.Post("/{skill_name}/enable", s.enableSkill)
+			r.Delete("/{skill_name}", s.deleteSkill)
+			r.Get("/{skill_name}/files/{source}/{file_path}", s.loadSkillFile)
+		})
+
+		api.Route("/workspace", func(r chi.Router) {
+			r.Get("/files", s.listWorkspaceFiles)
+			r.Get("/files/*", s.getWorkspaceFile)
+			r.Put("/files/*", s.putWorkspaceFile)
+			r.Delete("/files/*", s.deleteWorkspaceFile)
+			r.Get("/export", s.exportWorkspace)
+			r.Post("/import", s.importWorkspace)
+		})
+
+		api.Route("/config", func(r chi.Router) {
+			r.Get("/channels", s.listChannels)
+			r.Get("/channels/types", s.listChannelTypes)
+			r.Put("/channels", s.putChannels)
+			r.Get("/channels/{channel_name}", s.getChannel)
+			r.Put("/channels/{channel_name}", s.putChannel)
+		})
 	})
 
-	r.Post("/agent/process", s.processAgent)
-	r.Post("/channels/qq/inbound", s.processQQInbound)
-	r.Get("/channels/qq/state", s.getQQInboundState)
-
-	r.Route("/cron", func(r chi.Router) {
-		r.Get("/jobs", s.listCronJobs)
-		r.Post("/jobs", s.createCronJob)
-		r.Get("/jobs/{job_id}", s.getCronJob)
-		r.Put("/jobs/{job_id}", s.updateCronJob)
-		r.Delete("/jobs/{job_id}", s.deleteCronJob)
-		r.Post("/jobs/{job_id}/pause", s.pauseCronJob)
-		r.Post("/jobs/{job_id}/resume", s.resumeCronJob)
-		r.Post("/jobs/{job_id}/run", s.runCronJob)
-		r.Get("/jobs/{job_id}/state", s.getCronJobState)
-	})
-
-	r.Route("/models", func(r chi.Router) {
-		r.Get("/", s.listProviders)
-		r.Get("/catalog", s.getModelCatalog)
-		r.Put("/{provider_id}/config", s.configureProvider)
-		r.Delete("/{provider_id}", s.deleteProvider)
-		r.Get("/active", s.getActiveModels)
-		r.Put("/active", s.setActiveModels)
-	})
-
-	r.Route("/envs", func(r chi.Router) {
-		r.Get("/", s.listEnvs)
-		r.Put("/", s.putEnvs)
-		r.Delete("/{key}", s.deleteEnv)
-	})
-
-	r.Route("/skills", func(r chi.Router) {
-		r.Get("/", s.listSkills)
-		r.Get("/available", s.listAvailableSkills)
-		r.Post("/batch-disable", s.batchDisableSkills)
-		r.Post("/batch-enable", s.batchEnableSkills)
-		r.Post("/", s.createSkill)
-		r.Post("/{skill_name}/disable", s.disableSkill)
-		r.Post("/{skill_name}/enable", s.enableSkill)
-		r.Delete("/{skill_name}", s.deleteSkill)
-		r.Get("/{skill_name}/files/{source}/{file_path}", s.loadSkillFile)
-	})
-
-	r.Route("/workspace", func(r chi.Router) {
-		r.Get("/files", s.listWorkspaceFiles)
-		r.Get("/files/*", s.getWorkspaceFile)
-		r.Put("/files/*", s.putWorkspaceFile)
-		r.Delete("/files/*", s.deleteWorkspaceFile)
-		r.Get("/export", s.exportWorkspace)
-		r.Post("/import", s.importWorkspace)
-	})
-
-	r.Route("/config", func(r chi.Router) {
-		r.Get("/channels", s.listChannels)
-		r.Get("/channels/types", s.listChannelTypes)
-		r.Put("/channels", s.putChannels)
-		r.Get("/channels/{channel_name}", s.getChannel)
-		r.Put("/channels/{channel_name}", s.putChannel)
-	})
+	if webHandler := webStaticHandler(s.cfg.WebDir); webHandler != nil {
+		r.Get("/*", webHandler)
+	}
 
 	return r
 }
@@ -384,6 +393,58 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func webStaticHandler(configuredWebDir string) http.HandlerFunc {
+	webDir, ok := resolveWebDir(configuredWebDir)
+	if !ok {
+		return nil
+	}
+	fileServer := http.FileServer(http.Dir(webDir))
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.NotFound(w, r)
+			return
+		}
+		cleanPath := path.Clean("/" + strings.TrimPrefix(r.URL.Path, "/"))
+		relPath := strings.TrimPrefix(cleanPath, "/")
+		if relPath != "" {
+			targetPath := filepath.Join(webDir, filepath.FromSlash(relPath))
+			if info, err := os.Stat(targetPath); err == nil && !info.IsDir() {
+				fileServer.ServeHTTP(w, r)
+				return
+			}
+		}
+		indexPath := filepath.Join(webDir, "index.html")
+		if info, err := os.Stat(indexPath); err != nil || info.IsDir() {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, indexPath)
+	}
+}
+
+func resolveWebDir(configuredWebDir string) (string, bool) {
+	raw := strings.TrimSpace(configuredWebDir)
+	if raw == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", false
+		}
+		raw = filepath.Join(cwd, defaultWebDirName)
+	}
+	if !filepath.IsAbs(raw) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", false
+		}
+		raw = filepath.Join(cwd, raw)
+	}
+	info, err := os.Stat(raw)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return raw, true
 }
 
 func (s *Server) listChats(w http.ResponseWriter, r *http.Request) {
@@ -4611,5 +4672,7 @@ func findRepoRoot() (string, error) {
 		}
 		current = parent
 	}
-	return "", errors.New("repository root not found")
+	// Release bundles do not contain .git metadata. In that case, treat the
+	// current working directory as the workspace root.
+	return start, nil
 }

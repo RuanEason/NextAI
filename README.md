@@ -228,12 +228,10 @@ node cli/index.js --help
 node cli/index.js chats list --api-base http://127.0.0.1:8088
 ```
 
-5. 启动 Web（静态文件）（web页面中配置你的模型和qq渠道）
+5. 打开 Web 控制台（由 Gateway 直接托管，无需额外启动 Python）
 
-```bash
-cd /opt/nextai
-python3 -m http.server 5173 --bind 0.0.0.0 --directory web
-```
+- 默认访问：`http://127.0.0.1:8088/`
+- 若你把前端目录放在别处，设置 `NEXTAI_WEB_DIR=/your/path/to/web`（Windows: `C:\path\to\web`）
 
 ### 方式二：按单独产物下载
 
@@ -246,11 +244,16 @@ python3 -m http.server 5173 --bind 0.0.0.0 --directory web
 
 这些产物都在 GitHub Release 附件中。
 
+> 注意：`v0.1.0-rc.5` 及更早版本的总包未包含 `docs/AI` 目录，因此 Web 配置页可能看不到 `docs/AI/AGENTS.md`、`docs/AI/ai-tools.md`。
+> 临时补救：把仓库里的 `docs/AI` 整个目录复制到部署目录同路径（例如 `/opt/nextai/docs/AI` 或 `C:\nextai\docs\AI`）。
+> 从后续版本开始，`nextai-release-linux-amd64.tar.gz` 和 `nextai-release-windows-amd64.zip` 会默认包含 `docs/AI`。
+
 ## 配置说明
 
 - `NEXTAI_HOST`：Gateway 监听地址（默认 `127.0.0.1`）
 - `NEXTAI_PORT`：Gateway 端口（默认 `8088`）
 - `NEXTAI_DATA_DIR`：数据目录（默认 `.data`）
+- `NEXTAI_WEB_DIR`：可选，Web 静态目录（默认 `web`，即在当前工作目录下查找）
 - `NEXTAI_API_KEY`：可选，设置后启用 API Key 鉴权
 
 当启用 `NEXTAI_API_KEY` 后，客户端可通过 `X-API-Key` 或 `Authorization: Bearer <key>` 访问 Gateway。

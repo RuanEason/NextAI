@@ -1,6 +1,6 @@
 # NextAI TODO
 
-更新时间：2026-02-17 19:55:48 +0800
+更新时间：2026-02-17 20:13:19 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`。
@@ -29,6 +29,15 @@
 - [x] `docs/v1-roadmap.md`、`docs/contracts.md`、本地开发文档、部署文档与发布模板已完成。
 
 ## 6. 实操验证（汇总）
+- [x] 2026-02-17 20:13 +0800 发布版免 Python 启动落地：Gateway 路由改为 API 鉴权分组 + 可选静态托管，新增 `NEXTAI_WEB_DIR`（默认 `web`）后可直接通过 `http://127.0.0.1:8088/` 访问前端。
+- [x] 2026-02-17 20:13 +0800 Web 托管回归补测：新增 `TestHandlerServesWebStaticFiles` 与 `TestHandlerWebStaticIsPublicWhenAPIKeyEnabled`，覆盖静态资源、SPA 回退与 API Key 下静态页可访问行为。
+- [x] 2026-02-17 20:13 +0800 配置文档同步：更新 `.env.example`、`README.md` 发布版指南与配置说明，移除“必须 python 启动 Web”的描述。
+- [x] 2026-02-17 20:13 +0800 验证通过：执行 `cd apps/gateway && go test ./internal/app -run "TestHandlerServesWebStaticFiles|TestHandlerWebStaticIsPublicWhenAPIKeyEnabled|TestFindRepoRootFallsBackToCurrentWorkingDirectoryWithoutGit"` 与 `cd apps/gateway && go test ./...` 均通过。
+- [x] 2026-02-17 20:06 +0800 发布包根目录回退修复：`findRepoRoot` 在无 `.git` 场景改为回退当前工作目录，解决发布版运行时 `docs/AI` 文本配置读取失败问题。
+- [x] 2026-02-17 20:06 +0800 回归测试补齐：新增 `TestFindRepoRootFallsBackToCurrentWorkingDirectoryWithoutGit`，覆盖“无 `.git` 目录时仍可定位工作根目录”场景。
+- [x] 2026-02-17 20:06 +0800 验证通过：执行 `cd apps/gateway && go test ./internal/app -run "TestFindRepoRootFallsBackToCurrentWorkingDirectoryWithoutGit|TestWorkspaceFilesListIncludesConfigAndSkillFiles|TestProcessAgentRejectsBrowserToolWithoutTask"` 与 `cd apps/gateway && go test ./...` 均通过。
+- [x] 2026-02-17 20:04 +0800 发布包缺失 `docs/AI` 修复：更新 `.github/workflows/release.yml`，Linux/Windows 总包均新增 `docs/AI` 目录拷贝，确保包含 `docs/AI/AGENTS.md` 与 `docs/AI/ai-tools.md`。
+- [x] 2026-02-17 20:04 +0800 README 补充兼容说明：新增 `v0.1.0-rc.5` 及更早版本缺失 `docs/AI` 的已知问题与手动补救步骤，并声明后续版本总包默认携带该目录。
 - [x] 2026-02-17 19:55 +0800 Windows 发布包能力落地：更新 `.github/workflows/release.yml`，新增 `gateway-windows-amd64.exe` 与 `nextai-release-windows-amd64.zip` 构建并随 GitHub Release 自动上传。
 - [x] 2026-02-17 19:55 +0800 README 发布指南补齐 Windows：新增 PowerShell 下载/解压、Gateway 启动、`NEXTAI_ENV_FILE` 配置示例，并在单独产物列表中补充 Windows 可执行文件与总包说明。
 - [x] 2026-02-17 19:47 +0800 发版前验证完成：执行 `cd apps/gateway && go test ./...` 与 `cd browser-agent-poc && pnpm run check` 均通过，满足本轮提交与发布前质量门禁。
