@@ -41,7 +41,7 @@ export function registerWorkspaceCommand(program: Command, client: ApiClient): v
     printResult(await client.workspaceRm(path));
   });
 
-  ws.command("export").option("--out <path>", "workspace.json").action(async (opts: { out: string }) => {
+  ws.command("export").option("--out <path>", "workspace.json", "workspace.json").action(async (opts: { out: string }) => {
     try {
       const payload = await client.workspaceExport();
       await writeFile(opts.out, JSON.stringify(payload, null, 2), "utf8");

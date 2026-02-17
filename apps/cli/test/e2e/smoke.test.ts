@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -308,5 +308,98 @@ describe("cli e2e", () => {
     expect(processCalls).toHaveLength(2);
     expect(JSON.parse(processCalls[0]?.body ?? "{}")).toMatchObject({ session_id: "s-alias", user_id: "u1", channel: "console" });
     expect(JSON.parse(processCalls[1]?.body ?? "{}")).toMatchObject({ session_id: "s-custom", user_id: "u1", channel: "console" });
+  });
+
+  it("workspace export uses default workspace.json when --out omitted", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "copaw-cli-e2e-export-default-"));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(tempDir);
+      const result = await runCLI(["--json", "workspace", "export"], async (url) => {
+        if (String(url).endsWith("/workspace/export")) {
+          return new Response(
+            JSON.stringify({
+              version: "v1",
+              skills: {},
+              config: {
+                envs: {},
+                channels: {},
+                models: {
+                  providers: {},
+                  active_llm: { provider_id: "", model: "" },
+                },
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      });
+
+      expect(result.exitCode).toBe(0);
+
+      const outFile = join(tempDir, "workspace.json");
+      const raw = await readFile(outFile, "utf8");
+      expect(raw).toContain("\"version\"");
+      expect(JSON.parse(raw)).toMatchObject({ version: "v1" });
+
+      const output = JSON.parse(result.logs[0] ?? "{}") as { written?: string };
+      expect(output.written).toBe("workspace.json");
+    } finally {
+      process.chdir(previousCwd);
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("workspace import defaults mode to replace when input json omits mode", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "copaw-cli-e2e-import-default-"));
+    try {
+      const inputFile = join(tempDir, "workspace-import.json");
+      const input = {
+        version: "v1",
+        skills: {},
+        config: {
+          envs: {},
+          channels: {},
+          models: {
+            providers: {},
+            active_llm: { provider_id: "", model: "" },
+          },
+        },
+      };
+      await writeFile(inputFile, JSON.stringify(input), "utf8");
+
+      let importBody = "";
+      const result = await runCLI(["workspace", "import", "--file", inputFile], async (url, init) => {
+        if (String(url).endsWith("/workspace/import")) {
+          importBody = typeof init?.body === "string" ? init.body : "";
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(importBody).not.toBe("");
+      expect(JSON.parse(importBody)).toMatchObject({
+        mode: "replace",
+        payload: input,
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("workspace put fails when both --body and --file are missing", async () => {
+    let fetchCalled = false;
+    const result = await runCLI(["workspace", "put", "--path", "skills/demo-skill.json"], async () => {
+      fetchCalled = true;
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("workspace put");
+    expect(result.errors[0]).toContain("--body");
+    expect(result.errors[0]).toContain("--file");
+    expect(fetchCalled).toBe(false);
   });
 });
