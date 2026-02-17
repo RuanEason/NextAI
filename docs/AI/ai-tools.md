@@ -2,25 +2,47 @@
 
 你可以通过 `POST /agent/process` 触发工具调用。
 
-## 工具
+## 工具（所有工具仅支持数组，单文件传单元素，多修改传多元素，地址填写仅支持绝对路径）
 
-- `shell`：执行 shell 命令（高风险）。
+- `view`：按行查看指定文件内容。
+- `edit`：按行替换指定文件内容。（使用此工具前先查看文件）
+- `shell`：执行 shell 命令。
 
 ## 调用格式
 
-通过 `biz_params.tool` 直接调用工具（当前仅支持 `shell`）：
+查看文件（`view`）：
 
 ```json
 {
-  "biz_params": {
-    "tool": {
-      "name": "shell",
-      "input": { "command": "pwd" }
-    }
-  }
+  "view": [{ "path": "", "start": 1, "end": 20 }]
 }
 ```
 
-## 安全边界
+编辑文件（`edit`）：
 
-- 非必要不要使用 `shell`。
+```json
+{
+  "edit": [
+    {
+      "path": "",
+      "start": 1,
+      "end": 1,
+      "content": "替换文档第一行"
+    }
+  ]
+}
+```
+
+执行 shell（`shell`）：
+
+```json
+{
+  "shell": [
+    {
+      "command": "pwd",
+      "cwd": "",
+      "timeout_seconds": 20
+    }
+  ]
+}
+```

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -12,15 +11,14 @@ import (
 )
 
 const (
-	shellToolEnableEnv      = "NEXTAI_ENABLE_SHELL_TOOL"
 	shellToolDefaultTimeout = 20 * time.Second
 	shellToolMaxTimeout     = 120 * time.Second
 	shellToolMaxOutputBytes = 16 * 1024
 )
 
 var (
-	ErrShellToolDisabled       = errors.New("shell_tool_disabled")
 	ErrShellToolCommandMissing = errors.New("shell_tool_command_missing")
+	ErrShellToolItemsInvalid   = errors.New("shell_tool_items_invalid")
 )
 
 type ShellTool struct{}
@@ -34,9 +32,40 @@ func (t *ShellTool) Name() string {
 }
 
 func (t *ShellTool) Invoke(input map[string]interface{}) (map[string]interface{}, error) {
-	if !envEnabled(os.Getenv(shellToolEnableEnv)) {
-		return nil, ErrShellToolDisabled
+	items, err := parseShellItems(input)
+	if err != nil {
+		return nil, err
 	}
+	results := make([]map[string]interface{}, 0, len(items))
+	allOK := true
+	for _, item := range items {
+		one, oneErr := t.invokeOne(item)
+		if oneErr != nil {
+			return nil, oneErr
+		}
+		if ok, _ := one["ok"].(bool); !ok {
+			allOK = false
+		}
+		results = append(results, one)
+	}
+	if len(results) == 1 {
+		return results[0], nil
+	}
+	texts := make([]string, 0, len(results))
+	for _, item := range results {
+		if text, ok := item["text"].(string); ok {
+			texts = append(texts, text)
+		}
+	}
+	return map[string]interface{}{
+		"ok":      allOK,
+		"count":   len(results),
+		"results": results,
+		"text":    strings.Join(texts, "\n"),
+	}, nil
+}
+
+func (t *ShellTool) invokeOne(input map[string]interface{}) (map[string]interface{}, error) {
 	command := strings.TrimSpace(stringValue(input["command"]))
 	if command == "" {
 		return nil, ErrShellToolCommandMissing
@@ -78,13 +107,35 @@ func (t *ShellTool) Invoke(input map[string]interface{}) (map[string]interface{}
 	}, nil
 }
 
-func envEnabled(raw string) bool {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
+func parseShellItems(input map[string]interface{}) ([]map[string]interface{}, error) {
+	rawItems, ok := input["items"]
+	if !ok || rawItems == nil {
+		return nil, ErrShellToolItemsInvalid
 	}
+	entries, ok := rawItems.([]interface{})
+	if !ok || len(entries) == 0 {
+		return nil, ErrShellToolItemsInvalid
+	}
+	out := make([]map[string]interface{}, 0, len(entries))
+	for _, item := range entries {
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			return nil, ErrShellToolItemsInvalid
+		}
+		out = append(out, cloneShellInputMap(entry))
+	}
+	return out, nil
+}
+
+func cloneShellInputMap(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return map[string]interface{}{}
+	}
+	out := make(map[string]interface{}, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func parseShellTimeout(raw interface{}) time.Duration {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -53,6 +54,66 @@ func newToolTestPath(t *testing.T, prefix string) (string, string) {
 	}
 	t.Cleanup(func() { _ = os.Remove(abs) })
 	return rel, abs
+}
+
+type streamingProbeWriter struct {
+	header      http.Header
+	status      int
+	body        strings.Builder
+	signal      chan struct{}
+	signalOnce  sync.Once
+	mutex       sync.Mutex
+	wroteHeader bool
+}
+
+func newStreamingProbeWriter() *streamingProbeWriter {
+	return &streamingProbeWriter{
+		header: make(http.Header),
+		signal: make(chan struct{}, 1),
+		status: http.StatusOK,
+	}
+}
+
+func (w *streamingProbeWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *streamingProbeWriter) WriteHeader(statusCode int) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	w.status = statusCode
+	w.wroteHeader = true
+}
+
+func (w *streamingProbeWriter) Write(p []byte) (int, error) {
+	w.mutex.Lock()
+	if !w.wroteHeader {
+		w.status = http.StatusOK
+		w.wroteHeader = true
+	}
+	n, err := w.body.Write(p)
+	w.mutex.Unlock()
+	w.notify()
+	return n, err
+}
+
+func (w *streamingProbeWriter) Flush() {
+	w.notify()
+}
+
+func (w *streamingProbeWriter) BodyString() string {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	return w.body.String()
+}
+
+func (w *streamingProbeWriter) notify() {
+	w.signalOnce.Do(func() {
+		select {
+		case w.signal <- struct{}{}:
+		default:
+		}
+	})
 }
 
 func TestHealthz(t *testing.T) {
@@ -148,6 +209,81 @@ func TestChatCreateAndGetHistory(t *testing.T) {
 	}
 }
 
+func TestProcessAgentPersistsToolCallNoticesInHistory(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPath := newToolTestPath(t, "history-tool-call")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	createReq := `{"name":"A","session_id":"s-history-tool","user_id":"u-history-tool","channel":"console","meta":{}}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPost, "/chats", strings.NewReader(createReq)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	var created map[string]interface{}
+	if err := json.Unmarshal(w1.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response failed: %v", err)
+	}
+	chatID, _ := created["id"].(string)
+	if strings.TrimSpace(chatID) == "" {
+		t.Fatalf("empty chat id: %v", created)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"view history tool call"}]}],
+		"session_id":"s-history-tool",
+		"user_id":"u-history-tool",
+		"channel":"console",
+		"stream":false,
+		"view":[{"path":%q,"start":1,"end":1}]
+	}`, absPath)
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodGet, "/chats/"+chatID, nil))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("history status=%d body=%s", w3.Code, w3.Body.String())
+	}
+
+	var history domain.ChatHistory
+	if err := json.Unmarshal(w3.Body.Bytes(), &history); err != nil {
+		t.Fatalf("decode history failed: %v body=%s", err, w3.Body.String())
+	}
+	if len(history.Messages) == 0 {
+		t.Fatalf("expected non-empty history, body=%s", w3.Body.String())
+	}
+	assistant := history.Messages[len(history.Messages)-1]
+	if assistant.Role != "assistant" {
+		t.Fatalf("expected assistant message at tail, got=%q", assistant.Role)
+	}
+	if len(assistant.Metadata) == 0 {
+		t.Fatalf("expected assistant metadata, body=%s", w3.Body.String())
+	}
+	rawNotices, ok := assistant.Metadata["tool_call_notices"].([]interface{})
+	if !ok || len(rawNotices) == 0 {
+		t.Fatalf("expected tool_call_notices metadata, got=%#v", assistant.Metadata["tool_call_notices"])
+	}
+	first, _ := rawNotices[0].(map[string]interface{})
+	raw, _ := first["raw"].(string)
+	if !strings.Contains(raw, `"type":"tool_call"`) || !strings.Contains(raw, `"name":"view"`) {
+		t.Fatalf("unexpected persisted tool notice raw: %q", raw)
+	}
+	toolOrder, ok := assistant.Metadata["tool_order"].(float64)
+	if !ok || toolOrder <= 0 {
+		t.Fatalf("expected positive tool_order, got=%#v", assistant.Metadata["tool_order"])
+	}
+	textOrder, ok := assistant.Metadata["text_order"].(float64)
+	if !ok || textOrder <= 0 {
+		t.Fatalf("expected positive text_order, got=%#v", assistant.Metadata["text_order"])
+	}
+}
+
 func TestProcessAgentRejectsUnsupportedChannel(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -207,8 +343,176 @@ func TestProcessAgentDispatchesToWebhookChannel(t *testing.T) {
 	}
 }
 
+func TestProcessAgentDispatchesToQQChannel(t *testing.T) {
+	var tokenCalls atomic.Int32
+	var messageCalls atomic.Int32
+	var messageBody map[string]interface{}
+
+	qqAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			tokenCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"qq-token","expires_in":7200}`))
+		case "/v2/users/u1/messages":
+			messageCalls.Add(1)
+			if got := r.Header.Get("Authorization"); got != "QQBot qq-token" {
+				t.Fatalf("unexpected authorization header: %s", got)
+			}
+			defer r.Body.Close()
+			if err := json.NewDecoder(r.Body).Decode(&messageBody); err != nil {
+				t.Fatalf("decode qq message body failed: %v", err)
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected qq path: %s", r.URL.Path)
+		}
+	}))
+	defer qqAPI.Close()
+
+	srv := newTestServer(t)
+	channelConfig := `{"enabled":true,"app_id":"app-1","client_secret":"secret-1","bot_prefix":"[BOT] ","token_url":"` + qqAPI.URL + `/token","api_base":"` + qqAPI.URL + `","target_type":"c2c"}`
+	configW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(configW, httptest.NewRequest(http.MethodPut, "/config/channels/qq", strings.NewReader(channelConfig)))
+	if configW.Code != http.StatusOK {
+		t.Fatalf("set qq channel config status=%d body=%s", configW.Code, configW.Body.String())
+	}
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello qq"}]}],"session_id":"s1","user_id":"u1","channel":"qq","stream":false}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	if got := tokenCalls.Load(); got != 1 {
+		t.Fatalf("expected one token call, got=%d", got)
+	}
+	if got := messageCalls.Load(); got != 1 {
+		t.Fatalf("expected one qq message call, got=%d", got)
+	}
+	if text, _ := messageBody["content"].(string); !strings.Contains(text, "Echo: hello qq") {
+		t.Fatalf("unexpected qq content: %#v", messageBody["content"])
+	}
+}
+
+func TestQQInboundDispatchesC2CEvent(t *testing.T) {
+	var tokenCalls atomic.Int32
+	var messageCalls atomic.Int32
+	var messageBody map[string]interface{}
+
+	qqAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			tokenCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"qq-token","expires_in":7200}`))
+		case "/v2/users/u-c2c/messages":
+			messageCalls.Add(1)
+			defer r.Body.Close()
+			if err := json.NewDecoder(r.Body).Decode(&messageBody); err != nil {
+				t.Fatalf("decode qq c2c message body failed: %v", err)
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected qq path: %s", r.URL.Path)
+		}
+	}))
+	defer qqAPI.Close()
+
+	srv := newTestServer(t)
+	channelConfig := `{"enabled":true,"app_id":"app-1","client_secret":"secret-1","token_url":"` + qqAPI.URL + `/token","api_base":"` + qqAPI.URL + `","target_type":"c2c"}`
+	configW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(configW, httptest.NewRequest(http.MethodPut, "/config/channels/qq", strings.NewReader(channelConfig)))
+	if configW.Code != http.StatusOK {
+		t.Fatalf("set qq channel config status=%d body=%s", configW.Code, configW.Body.String())
+	}
+
+	inboundReq := `{"t":"C2C_MESSAGE_CREATE","d":{"id":"m-c2c-1","content":"hello inbound c2c","author":{"user_openid":"u-c2c"}}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/channels/qq/inbound", strings.NewReader(inboundReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("inbound status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	if got := tokenCalls.Load(); got != 1 {
+		t.Fatalf("expected one token call, got=%d", got)
+	}
+	if got := messageCalls.Load(); got != 1 {
+		t.Fatalf("expected one qq c2c dispatch, got=%d", got)
+	}
+	if text, _ := messageBody["content"].(string); !strings.Contains(text, "Echo: hello inbound c2c") {
+		t.Fatalf("unexpected qq c2c content: %#v", messageBody["content"])
+	}
+}
+
+func TestQQInboundDispatchesGroupEvent(t *testing.T) {
+	var tokenCalls atomic.Int32
+	var groupCalls atomic.Int32
+	var groupBody map[string]interface{}
+
+	qqAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			tokenCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"qq-token","expires_in":7200}`))
+		case "/v2/groups/group-openid-1/messages":
+			groupCalls.Add(1)
+			defer r.Body.Close()
+			if err := json.NewDecoder(r.Body).Decode(&groupBody); err != nil {
+				t.Fatalf("decode qq group message body failed: %v", err)
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected qq path: %s", r.URL.Path)
+		}
+	}))
+	defer qqAPI.Close()
+
+	srv := newTestServer(t)
+	channelConfig := `{"enabled":true,"app_id":"app-1","client_secret":"secret-1","token_url":"` + qqAPI.URL + `/token","api_base":"` + qqAPI.URL + `","target_type":"c2c"}`
+	configW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(configW, httptest.NewRequest(http.MethodPut, "/config/channels/qq", strings.NewReader(channelConfig)))
+	if configW.Code != http.StatusOK {
+		t.Fatalf("set qq channel config status=%d body=%s", configW.Code, configW.Body.String())
+	}
+
+	inboundReq := `{"t":"GROUP_AT_MESSAGE_CREATE","d":{"id":"m-group-1","content":"hello inbound group","group_openid":"group-openid-1","author":{"member_openid":"u-group-1"}}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/channels/qq/inbound", strings.NewReader(inboundReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("inbound status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	if got := tokenCalls.Load(); got != 1 {
+		t.Fatalf("expected one token call, got=%d", got)
+	}
+	if got := groupCalls.Load(); got != 1 {
+		t.Fatalf("expected one qq group dispatch, got=%d", got)
+	}
+	if text, _ := groupBody["content"].(string); !strings.Contains(text, "Echo: hello inbound group") {
+		t.Fatalf("unexpected qq group content: %#v", groupBody["content"])
+	}
+	if got, ok := groupBody["msg_type"].(float64); !ok || got != 0 {
+		t.Fatalf("unexpected group msg_type: %#v", groupBody["msg_type"])
+	}
+}
+
+func TestQQInboundRejectsUnsupportedEvent(t *testing.T) {
+	srv := newTestServer(t)
+	inboundReq := `{"t":"MESSAGE_DELETE","d":{"id":"m-delete"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/channels/qq/inbound", strings.NewReader(inboundReq)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_qq_event"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
 func TestProcessAgentRunsShellTool(t *testing.T) {
-	t.Setenv("NEXTAI_ENABLE_SHELL_TOOL", "true")
 	srv := newTestServer(t)
 
 	procReq := `{
@@ -217,7 +521,7 @@ func TestProcessAgentRunsShellTool(t *testing.T) {
 		"user_id":"u-shell",
 		"channel":"console",
 		"stream":false,
-		"biz_params":{"tool":{"name":"shell","input":{"command":"printf hello"}}}
+		"biz_params":{"tool":{"name":"shell","items":[{"command":"printf hello"}]}}
 	}`
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
@@ -251,6 +555,7 @@ func TestProcessAgentRejectsUnknownTool(t *testing.T) {
 }
 
 func TestProcessAgentRejectsShellToolWhenDisabled(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLED_TOOLS", "shell")
 	srv := newTestServer(t)
 
 	procReq := `{
@@ -259,7 +564,7 @@ func TestProcessAgentRejectsShellToolWhenDisabled(t *testing.T) {
 		"user_id":"u-shell-disabled",
 		"channel":"console",
 		"stream":false,
-		"biz_params":{"tool":{"name":"shell","input":{"command":"pwd"}}}
+		"biz_params":{"tool":{"name":"shell","items":[{"command":"pwd"}]}}
 	}`
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
@@ -272,7 +577,6 @@ func TestProcessAgentRejectsShellToolWhenDisabled(t *testing.T) {
 }
 
 func TestProcessAgentRejectsShellToolWithoutCommand(t *testing.T) {
-	t.Setenv("NEXTAI_ENABLE_SHELL_TOOL", "true")
 	srv := newTestServer(t)
 
 	procReq := `{
@@ -281,7 +585,7 @@ func TestProcessAgentRejectsShellToolWithoutCommand(t *testing.T) {
 		"user_id":"u-shell-empty",
 		"channel":"console",
 		"stream":false,
-		"biz_params":{"tool":{"name":"shell","input":{}}}
+		"biz_params":{"tool":{"name":"shell","items":[{}]}}
 	}`
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
@@ -473,9 +777,323 @@ func TestProcessAgentOpenAIConfigured(t *testing.T) {
 	}
 }
 
-func TestProcessAgentRunsMultiStepAgentLoop(t *testing.T) {
-	t.Setenv("NEXTAI_ENABLE_SHELL_TOOL", "true")
+func TestProcessAgentOmitsBlacklistedToolsFromModelRequest(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLED_TOOLS", "shell")
 
+	var requestBody map[string]interface{}
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatalf("decode request body failed: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"provider reply"}}]}`))
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello"}]}],"session_id":"s1","user_id":"u1","channel":"console","stream":false}`
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w3.Code, w3.Body.String())
+	}
+
+	rawTools, ok := requestBody["tools"].([]interface{})
+	if !ok || len(rawTools) == 0 {
+		t.Fatalf("expected non-shell tools to remain, got=%#v", requestBody["tools"])
+	}
+	names := map[string]bool{}
+	for _, item := range rawTools {
+		def, _ := item.(map[string]interface{})
+		fn, _ := def["function"].(map[string]interface{})
+		name, _ := fn["name"].(string)
+		if strings.TrimSpace(name) != "" {
+			names[name] = true
+		}
+	}
+	if names["shell"] {
+		t.Fatalf("expected shell to be excluded when blacklisted, got=%#v", names)
+	}
+	if !names["view"] || !names["edit"] {
+		t.Fatalf("expected line tools in model request, got=%#v", names)
+	}
+}
+
+func TestProcessAgentViewsSpecificFileLines(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPath := newToolTestPath(t, "view-lines")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\nline-3\nline-4\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"view lines"}]}],
+		"session_id":"s-view-lines",
+		"user_id":"u-view-lines",
+		"channel":"console",
+		"stream":false,
+		"view":[{"path":%q,"start":2,"end":3}]
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "2: line-2") || !strings.Contains(w.Body.String(), "3: line-3") {
+		t.Fatalf("expected selected line output, got=%s", w.Body.String())
+	}
+}
+
+func TestProcessAgentViewOutOfBoundsFallsBackToFullFile(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPath := newToolTestPath(t, "view-lines-fallback")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\nline-3\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"view out of bounds"}]}],
+		"session_id":"s-view-lines-fallback",
+		"user_id":"u-view-lines-fallback",
+		"channel":"console",
+		"stream":false,
+		"view":[{"path":%q,"start":1,"end":100}]
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "1: line-1") || !strings.Contains(body, "3: line-3") {
+		t.Fatalf("expected full file output, got=%s", body)
+	}
+	if !strings.Contains(body, "fallback from requested [1-100]") {
+		t.Fatalf("expected fallback marker in output, got=%s", body)
+	}
+}
+
+func TestProcessAgentViewOutOfBoundsFallsBackToEmptyFile(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPath := newToolTestPath(t, "view-lines-empty-fallback")
+	if err := os.WriteFile(absPath, []byte(""), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"view empty out of bounds"}]}],
+		"session_id":"s-view-lines-empty-fallback",
+		"user_id":"u-view-lines-empty-fallback",
+		"channel":"console",
+		"stream":false,
+		"view":[{"path":%q,"start":1,"end":100}]
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "view "+absPath+" [empty] (fallback from requested [1-100], total=0)") {
+		t.Fatalf("expected empty fallback marker in output, got=%s", body)
+	}
+}
+
+func TestProcessAgentEditsSpecificFileLines(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPath := newToolTestPath(t, "edit-lines")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\nline-3\nline-4\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"edit lines"}]}],
+		"session_id":"s-edit-lines",
+		"user_id":"u-edit-lines",
+		"channel":"console",
+		"stream":false,
+		"edit":[{"path":%q,"start":2,"end":3,"content":"new-2\nnew-3"}]
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	updated, err := os.ReadFile(absPath)
+	if err != nil {
+		t.Fatalf("read updated file failed: %v", err)
+	}
+	if string(updated) != "line-1\nnew-2\nnew-3\nline-4\n" {
+		t.Fatalf("unexpected updated file content: %q", string(updated))
+	}
+}
+
+func TestProcessAgentViewsMultipleFilesWithInputItems(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPathA := newToolTestPath(t, "view-multi-a")
+	_, absPathB := newToolTestPath(t, "view-multi-b")
+	if err := os.WriteFile(absPathA, []byte("a-1\na-2\na-3\n"), 0o644); err != nil {
+		t.Fatalf("seed first tool test file failed: %v", err)
+	}
+	if err := os.WriteFile(absPathB, []byte("b-1\nb-2\nb-3\n"), 0o644); err != nil {
+		t.Fatalf("seed second tool test file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"view multiple files"}]}],
+		"session_id":"s-view-multi",
+		"user_id":"u-view-multi",
+		"channel":"console",
+		"stream":false,
+		"view":[
+			{"path":%q,"start":1,"end":1},
+			{"path":%q,"start":2,"end":2}
+		]
+	}`, absPathA, absPathB)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "1: a-1") || !strings.Contains(w.Body.String(), "2: b-2") {
+		t.Fatalf("expected multi file output, got=%s", w.Body.String())
+	}
+}
+
+func TestProcessAgentEditsMultipleFilesWithInputItems(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPathA := newToolTestPath(t, "edit-multi-a")
+	_, absPathB := newToolTestPath(t, "edit-multi-b")
+	if err := os.WriteFile(absPathA, []byte("a-1\na-2\n"), 0o644); err != nil {
+		t.Fatalf("seed first tool test file failed: %v", err)
+	}
+	if err := os.WriteFile(absPathB, []byte("b-1\nb-2\n"), 0o644); err != nil {
+		t.Fatalf("seed second tool test file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"edit multiple files"}]}],
+		"session_id":"s-edit-multi",
+		"user_id":"u-edit-multi",
+		"channel":"console",
+		"stream":false,
+		"edit":[
+			{"path":%q,"start":1,"end":1,"content":"a-x"},
+			{"path":%q,"start":2,"end":2,"content":"b-y"}
+		]
+	}`, absPathA, absPathB)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	updatedA, err := os.ReadFile(absPathA)
+	if err != nil {
+		t.Fatalf("read first updated file failed: %v", err)
+	}
+	updatedB, err := os.ReadFile(absPathB)
+	if err != nil {
+		t.Fatalf("read second updated file failed: %v", err)
+	}
+	if string(updatedA) != "a-x\na-2\n" {
+		t.Fatalf("unexpected first updated file content: %q", string(updatedA))
+	}
+	if string(updatedB) != "b-1\nb-y\n" {
+		t.Fatalf("unexpected second updated file content: %q", string(updatedB))
+	}
+}
+
+func TestProcessAgentRejectsSingleEditObjectInput(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPath := newToolTestPath(t, "edit-object-invalid")
+	if err := os.WriteFile(absPath, []byte("x-1\nx-2\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"edit object invalid"}]}],
+		"session_id":"s-edit-object-invalid",
+		"user_id":"u-edit-object-invalid",
+		"channel":"console",
+		"stream":false,
+		"edit":{"input":{"path":%q,"start":1,"end":1,"content":"x-y"}}
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_tool_input"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestProcessAgentRejectsSingleViewObjectInput(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPath := newToolTestPath(t, "view-object-invalid")
+	if err := os.WriteFile(absPath, []byte("x-1\nx-2\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"view object invalid"}]}],
+		"session_id":"s-view-object-invalid",
+		"user_id":"u-view-object-invalid",
+		"channel":"console",
+		"stream":false,
+		"view":{"input":{"path":%q,"start":1,"end":1}}
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_tool_input"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestProcessAgentRejectsSingleShellObjectInput(t *testing.T) {
+	srv := newTestServer(t)
+	procReq := `{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"shell object invalid"}]}],
+		"session_id":"s-shell-object-invalid",
+		"user_id":"u-shell-object-invalid",
+		"channel":"console",
+		"stream":false,
+		"shell":{"input":{"command":"printf hi"}}
+	}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_tool_input"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestProcessAgentRunsMultiStepAgentLoop(t *testing.T) {
 	var calls int
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -484,7 +1102,7 @@ func TestProcessAgentRunsMultiStepAgentLoop(t *testing.T) {
 			return
 		}
 		if calls == 1 {
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_shell","type":"function","function":{"name":"shell","arguments":"{\"command\":\"printf from-tool\"}"}}]}}]}`))
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_shell","type":"function","function":{"name":"shell","arguments":"{\"items\":[{\"command\":\"printf from-tool\"}]}"}}]}}]}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"final answer from tool"}}]}`))
@@ -537,8 +1155,331 @@ func TestProcessAgentRunsMultiStepAgentLoop(t *testing.T) {
 	}
 }
 
+func TestProcessAgentContinuesAfterToolInputError(t *testing.T) {
+	_, absPath := newToolTestPath(t, "edit-lines-error-continue")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+	toolArgs, err := json.Marshal(map[string]interface{}{
+		"items": []map[string]interface{}{
+			{
+				"path":    absPath,
+				"start":   9,
+				"end":     9,
+				"content": "x",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal tool args failed: %v", err)
+	}
+
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_edit",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "edit",
+										"arguments": string(toolArgs),
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		messages, _ := req["messages"].([]interface{})
+		hasToolErrorFeedback := false
+		for _, item := range messages {
+			msg, _ := item.(map[string]interface{})
+			role, _ := msg["role"].(string)
+			content, _ := msg["content"].(string)
+			if role == "tool" &&
+				strings.Contains(content, "tool_error code=invalid_tool_input") &&
+				strings.Contains(content, "tool input line range is out of file bounds") {
+				hasToolErrorFeedback = true
+				break
+			}
+		}
+		if !hasToolErrorFeedback {
+			t.Fatalf("expected tool error feedback in second provider request, got=%#v", req["messages"])
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{
+						"content": "fixed after tool error",
+					},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"edit then recover"}]}],"session_id":"s-tool-error-recover","user_id":"u-tool-error-recover","channel":"console","stream":false}`
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w3.Code, w3.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+
+	var out domain.AgentProcessResponse
+	if err := json.Unmarshal(w3.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w3.Body.String())
+	}
+	if out.Reply != "fixed after tool error" {
+		t.Fatalf("unexpected final reply: %q", out.Reply)
+	}
+
+	hasFailedToolResult := false
+	for _, evt := range out.Events {
+		if evt.Type == "tool_result" && evt.ToolResult != nil && evt.ToolResult.Name == "edit" && !evt.ToolResult.OK {
+			hasFailedToolResult = true
+			if !strings.Contains(evt.ToolResult.Summary, "tool input line range is out of file bounds") {
+				t.Fatalf("unexpected tool error summary: %q", evt.ToolResult.Summary)
+			}
+		}
+	}
+	if !hasFailedToolResult {
+		t.Fatalf("expected failed tool_result event, got=%+v", out.Events)
+	}
+}
+
+func TestProcessAgentContinuesAfterToolPathError(t *testing.T) {
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_view",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "view",
+										"arguments": `{"items":[{"path":"docs/contracts.md","start":1,"end":2}]}`,
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		messages, _ := req["messages"].([]interface{})
+		hasToolErrorFeedback := false
+		for _, item := range messages {
+			msg, _ := item.(map[string]interface{})
+			role, _ := msg["role"].(string)
+			content, _ := msg["content"].(string)
+			if role == "tool" &&
+				strings.Contains(content, "tool_error code=invalid_tool_input") &&
+				strings.Contains(content, "tool input path is invalid") {
+				hasToolErrorFeedback = true
+				break
+			}
+		}
+		if !hasToolErrorFeedback {
+			t.Fatalf("expected path error feedback in second provider request, got=%#v", req["messages"])
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{
+						"content": "fixed after path error",
+					},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"view then recover"}]}],"session_id":"s-tool-path-recover","user_id":"u-tool-path-recover","channel":"console","stream":false}`
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w3.Code, w3.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+
+	var out domain.AgentProcessResponse
+	if err := json.Unmarshal(w3.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w3.Body.String())
+	}
+	if out.Reply != "fixed after path error" {
+		t.Fatalf("unexpected final reply: %q", out.Reply)
+	}
+}
+
+func TestProcessAgentStillSupportsLegacyBizParamsToolFormat(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPath := newToolTestPath(t, "legacy-view-lines")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\nline-3\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"legacy view"}]}],
+		"session_id":"s-legacy-view",
+		"user_id":"u-legacy-view",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{"tool":{"name":"view","items":[{"path":%q,"start":1,"end":1}]}}
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "1: line-1") {
+		t.Fatalf("expected legacy format output, got=%s", w.Body.String())
+	}
+}
+
+func TestProcessAgentAllowsAbsolutePathOutsideRepositoryForViewTool(t *testing.T) {
+	srv := newTestServer(t)
+	outside := filepath.Join(t.TempDir(), "outside-view.txt")
+	if err := os.WriteFile(outside, []byte("outside-1\noutside-2\n"), 0o644); err != nil {
+		t.Fatalf("seed outside file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"view outside path"}]}],
+		"session_id":"s-outside-view",
+		"user_id":"u-outside-view",
+		"channel":"console",
+		"stream":false,
+		"view":[{"path":%q,"start":1,"end":2}]
+	}`, outside)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "1: outside-1") {
+		t.Fatalf("expected outside path output, got=%s", w.Body.String())
+	}
+}
+
+func TestProcessAgentAllowsAbsolutePathOutsideRepositoryForEditTool(t *testing.T) {
+	srv := newTestServer(t)
+	outside := filepath.Join(t.TempDir(), "outside-edit.txt")
+	if err := os.WriteFile(outside, []byte("old-1\nold-2\nold-3\n"), 0o644); err != nil {
+		t.Fatalf("seed outside file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"edit outside path"}]}],
+		"session_id":"s-outside-edit",
+		"user_id":"u-outside-edit",
+		"channel":"console",
+		"stream":false,
+		"edit":[{"path":%q,"start":2,"end":2,"content":"new-2"}]
+	}`, outside)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	raw, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("read outside file failed: %v", err)
+	}
+	if string(raw) != "old-1\nnew-2\nold-3\n" {
+		t.Fatalf("unexpected file content: %q", string(raw))
+	}
+}
+
+func TestProcessAgentRejectsRelativePathForViewTool(t *testing.T) {
+	srv := newTestServer(t)
+	procReq := `{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"relative path"}]}],
+		"session_id":"s-relative-path",
+		"user_id":"u-relative-path",
+		"channel":"console",
+		"stream":false,
+		"view":[{"path":"docs/contracts.md","start":1,"end":1}]
+	}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_tool_input"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
 func TestProcessAgentStreamIncludesStructuredEvents(t *testing.T) {
-	t.Setenv("NEXTAI_ENABLE_SHELL_TOOL", "true")
 	srv := newTestServer(t)
 
 	procReq := `{
@@ -547,7 +1488,7 @@ func TestProcessAgentStreamIncludesStructuredEvents(t *testing.T) {
 		"user_id":"u-stream-events",
 		"channel":"console",
 		"stream":true,
-		"biz_params":{"tool":{"name":"shell","input":{"command":"printf stream"}}}
+		"biz_params":{"tool":{"name":"shell","items":[{"command":"printf stream"}]}}
 	}`
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
@@ -563,6 +1504,64 @@ func TestProcessAgentStreamIncludesStructuredEvents(t *testing.T) {
 	}
 	if !strings.Contains(body, `"type":"assistant_delta"`) {
 		t.Fatalf("expected assistant_delta event, body=%s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("expected DONE marker, body=%s", body)
+	}
+}
+
+func TestProcessAgentStreamFlushesEventsInRealTime(t *testing.T) {
+	srv := newTestServer(t)
+
+	procReq := `{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"stream realtime"}]}],
+		"session_id":"s-stream-realtime",
+		"user_id":"u-stream-realtime",
+		"channel":"console",
+		"stream":true,
+		"biz_params":{"tool":{"name":"shell","items":[{"command":"sleep 1; printf stream"}]}}
+	}`
+
+	req := httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq))
+	writer := newStreamingProbeWriter()
+	done := make(chan struct{})
+	go func() {
+		srv.Handler().ServeHTTP(writer, req)
+		close(done)
+	}()
+
+	select {
+	case <-writer.signal:
+	case <-time.After(350 * time.Millisecond):
+		t.Fatalf("expected SSE chunk before tool execution finished, body=%s", writer.BodyString())
+	}
+
+	select {
+	case <-done:
+		t.Fatalf("expected request to keep running after first SSE event, body=%s", writer.BodyString())
+	default:
+	}
+
+	partialBody := writer.BodyString()
+	if !strings.Contains(partialBody, `"type":"step_started"`) {
+		t.Fatalf("expected step_started in early stream chunk, body=%s", partialBody)
+	}
+	if strings.Contains(partialBody, "data: [DONE]") {
+		t.Fatalf("unexpected DONE before tool finished, body=%s", partialBody)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("stream request timeout, partial body=%s", writer.BodyString())
+	}
+
+	body := writer.BodyString()
+	if !strings.Contains(body, `"type":"tool_call"`) {
+		t.Fatalf("expected tool_call event, body=%s", body)
+	}
+	if !strings.Contains(body, `"type":"completed"`) {
+		t.Fatalf("expected completed event, body=%s", body)
 	}
 	if !strings.Contains(body, "data: [DONE]") {
 		t.Fatalf("expected DONE marker, body=%s", body)

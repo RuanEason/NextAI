@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -48,6 +49,9 @@ const (
 	aiToolsGuideRelativePath       = "docs/AI/ai-tools.md"
 	aiToolsGuideLegacyRelativePath = "docs/ai-tools.md"
 	aiToolsGuidePathEnv            = "NEXTAI_AI_TOOLS_GUIDE_PATH"
+	disabledToolsEnv               = "NEXTAI_DISABLED_TOOLS"
+
+	replyChunkSizeDefault = 12
 )
 
 var errCronJobNotFound = errors.New("cron_job_not_found")
@@ -59,6 +63,8 @@ type Server struct {
 	runner   *runner.Runner
 	channels map[string]plugin.ChannelPlugin
 	tools    map[string]plugin.ToolPlugin
+
+	disabledTools map[string]struct{}
 
 	cronStop chan struct{}
 	cronDone chan struct{}
@@ -79,12 +85,18 @@ func NewServer(cfg config.Config) (*Server, error) {
 		runner:   runner.New(),
 		channels: map[string]plugin.ChannelPlugin{},
 		tools:    map[string]plugin.ToolPlugin{},
+		disabledTools: parseDisabledTools(
+			os.Getenv(disabledToolsEnv),
+		),
 		cronStop: make(chan struct{}),
 		cronDone: make(chan struct{}),
 	}
 	srv.registerChannelPlugin(channel.NewConsoleChannel())
 	srv.registerChannelPlugin(channel.NewWebhookChannel())
+	srv.registerChannelPlugin(channel.NewQQChannel())
 	srv.registerToolPlugin(plugin.NewShellTool())
+	srv.registerToolPlugin(plugin.NewViewFileLinesTool(""))
+	srv.registerToolPlugin(plugin.NewEditFileLinesTool(""))
 	srv.startCronScheduler()
 	return srv, nil
 }
@@ -119,6 +131,29 @@ func (s *Server) registerToolPlugin(tp plugin.ToolPlugin) {
 	s.tools[name] = tp
 }
 
+func parseDisabledTools(raw string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, part := range strings.Split(raw, ",") {
+		name := strings.ToLower(strings.TrimSpace(part))
+		if name == "" {
+			continue
+		}
+		out[name] = struct{}{}
+	}
+	return out
+}
+
+func (s *Server) toolDisabled(name string) bool {
+	if s == nil {
+		return false
+	}
+	if len(s.disabledTools) == 0 {
+		return false
+	}
+	_, ok := s.disabledTools[strings.ToLower(strings.TrimSpace(name))]
+	return ok
+}
+
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
@@ -140,6 +175,7 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	r.Post("/agent/process", s.processAgent)
+	r.Post("/channels/qq/inbound", s.processQQInbound)
 
 	r.Route("/cron", func(r chi.Router) {
 		r.Get("/jobs", s.listCronJobs)
@@ -460,8 +496,74 @@ func (s *Server) deleteChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
+		return
+	}
+	s.processAgentWithBody(w, r, bodyBytes)
+}
+
+func (s *Server) processQQInbound(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
+		return
+	}
+
+	event, err := parseQQInboundEvent(bodyBytes)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_qq_event", err.Error(), nil)
+		return
+	}
+	if strings.TrimSpace(event.Text) == "" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"accepted": false,
+			"reason":   "empty_text",
+		})
+		return
+	}
+
+	request := domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{
+			{
+				Role: "user",
+				Type: "message",
+				Content: []domain.RuntimeContent{
+					{Type: "text", Text: event.Text},
+				},
+			},
+		},
+		SessionID: event.SessionID,
+		UserID:    event.UserID,
+		Channel:   "qq",
+		Stream:    false,
+		BizParams: map[string]interface{}{
+			"channel": map[string]interface{}{
+				"target_type": event.TargetType,
+				"target_id":   event.TargetID,
+				"msg_id":      event.MessageID,
+			},
+		},
+	}
+
+	agentBody, err := json.Marshal(request)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "qq_inbound_marshal_failed", "failed to build agent request", nil)
+		return
+	}
+	s.processAgentWithBody(w, r, agentBody)
+}
+
+func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bodyBytes []byte) {
+
 	var req domain.AgentProcessRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
+		return
+	}
+	rawRequest := map[string]interface{}{}
+	if err := json.Unmarshal(bodyBytes, &rawRequest); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 		return
 	}
@@ -517,19 +619,65 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
-	requestedToolCall, hasToolCall, err := parseToolCall(req.BizParams)
+	requestedToolCall, hasToolCall, err := parseToolCall(req.BizParams, rawRequest)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_tool_input", err.Error(), nil)
 		return
+	}
+
+	streaming := req.Stream
+	var flusher http.Flusher
+	streamStarted := false
+	if streaming {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		var ok bool
+		flusher, ok = w.(http.Flusher)
+		if !ok {
+			writeErr(w, http.StatusInternalServerError, "stream_not_supported", "streaming not supported", nil)
+			return
+		}
+	}
+
+	streamFail := func(status int, code, message string, details interface{}) {
+		if !streaming || !streamStarted {
+			writeErr(w, status, code, message, details)
+			return
+		}
+		meta := map[string]interface{}{
+			"code":    code,
+			"message": message,
+		}
+		if details != nil {
+			meta["details"] = details
+		}
+		payload, _ := json.Marshal(domain.AgentEvent{
+			Type: "error",
+			Meta: meta,
+		})
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+		flusher.Flush()
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
 	}
 
 	reply := ""
 	events := make([]domain.AgentEvent, 0, 12)
 	appendEvent := func(evt domain.AgentEvent) {
 		events = append(events, evt)
+		if !streaming {
+			return
+		}
+		payload, _ := json.Marshal(evt)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+		flusher.Flush()
+		streamStarted = true
 	}
+	replyChunkSize := replyChunkSizeDefault
 	appendReplyDeltas := func(step int, text string) {
-		for _, chunk := range splitReplyChunks(text, 12) {
+		for _, chunk := range splitReplyChunks(text, replyChunkSize) {
 			appendEvent(domain.AgentEvent{
 				Type:  "assistant_delta",
 				Step:  step,
@@ -552,7 +700,7 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		reply, err = s.executeToolCall(requestedToolCall)
 		if err != nil {
 			status, code, message := mapToolError(err)
-			writeErr(w, status, code, message, nil)
+			streamFail(status, code, message, nil)
 			return
 		}
 		appendEvent(domain.AgentEvent{
@@ -576,12 +724,12 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			if !providerEnabled(providerSetting) {
-				writeErr(w, http.StatusBadRequest, "provider_disabled", "active provider is disabled", nil)
+				streamFail(http.StatusBadRequest, "provider_disabled", "active provider is disabled", nil)
 				return
 			}
 			resolvedModel, ok := provider.ResolveModelID(activeLLM.ProviderID, activeLLM.Model, providerSetting.ModelAliases)
 			if !ok {
-				writeErr(w, http.StatusBadRequest, "model_not_found", "active model is not available for provider", nil)
+				streamFail(http.StatusBadRequest, "model_not_found", "active model is not available for provider", nil)
 				return
 			}
 			activeLLM.Model = resolvedModel
@@ -605,10 +753,26 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 			appendEvent(domain.AgentEvent{Type: "step_started", Step: step})
 			turnReq := effectiveReq
 			turnReq.Input = workflowInput
-			turn, runErr := s.runner.GenerateTurn(r.Context(), turnReq, generateConfig, s.listToolDefinitions())
+			stepHadStreamingDelta := false
+			turn, runErr := runner.TurnResult{}, error(nil)
+			if streaming {
+				turn, runErr = s.runner.GenerateTurnStream(r.Context(), turnReq, generateConfig, s.listToolDefinitions(), func(delta string) {
+					if delta == "" {
+						return
+					}
+					stepHadStreamingDelta = true
+					appendEvent(domain.AgentEvent{
+						Type:  "assistant_delta",
+						Step:  step,
+						Delta: delta,
+					})
+				})
+			} else {
+				turn, runErr = s.runner.GenerateTurn(r.Context(), turnReq, generateConfig, s.listToolDefinitions())
+			}
 			if runErr != nil {
 				status, code, message := mapRunnerError(runErr)
-				writeErr(w, status, code, message, nil)
+				streamFail(status, code, message, nil)
 				return
 			}
 			if len(turn.ToolCalls) == 0 {
@@ -616,7 +780,9 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 				if reply == "" {
 					reply = "(empty reply)"
 				}
-				appendReplyDeltas(step, reply)
+				if !streaming || !stepHadStreamingDelta {
+					appendReplyDeltas(step, reply)
+				}
 				appendEvent(domain.AgentEvent{Type: "completed", Step: step, Reply: reply})
 				break
 			}
@@ -643,9 +809,26 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 				})
 				toolReply, toolErr := s.executeToolCall(toolCall{Name: call.Name, Input: safeMap(call.Arguments)})
 				if toolErr != nil {
-					status, code, message := mapToolError(toolErr)
-					writeErr(w, status, code, message, nil)
-					return
+					toolReply = formatToolErrorFeedback(toolErr)
+					appendEvent(domain.AgentEvent{
+						Type: "tool_result",
+						Step: step,
+						ToolResult: &domain.AgentToolResultPayload{
+							Name:    call.Name,
+							OK:      false,
+							Summary: summarizeAgentEventText(toolReply),
+						},
+					})
+					workflowInput = append(workflowInput, domain.AgentInputMessage{
+						Role:    "tool",
+						Type:    "message",
+						Content: []domain.RuntimeContent{{Type: "text", Text: toolReply}},
+						Metadata: map[string]interface{}{
+							"tool_call_id": call.ID,
+							"name":         call.Name,
+						},
+					})
+					continue
 				}
 				appendEvent(domain.AgentEvent{
 					Type: "tool_result",
@@ -675,6 +858,9 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		Type:    "message",
 		Content: []domain.RuntimeContent{{Type: "text", Text: reply}},
 	}
+	if metadata := buildAssistantMessageMetadata(events); len(metadata) > 0 {
+		assistant.Metadata = metadata
+	}
 
 	_ = s.store.Write(func(state *repo.State) error {
 		state.Histories[chatID] = append(state.Histories[chatID], assistant)
@@ -694,17 +880,18 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	if err := channelPlugin.SendText(r.Context(), req.UserID, req.SessionID, reply, channelCfg); err != nil {
+	dispatchCfg := mergeChannelDispatchConfig(channelName, channelCfg, req.BizParams)
+	if err := channelPlugin.SendText(r.Context(), req.UserID, req.SessionID, reply, dispatchCfg); err != nil {
 		status, code, message := mapChannelError(&channelError{
 			Code:    "channel_dispatch_failed",
 			Message: fmt.Sprintf("failed to dispatch message to channel %q", channelName),
 			Err:     err,
 		})
-		writeErr(w, status, code, message, nil)
+		streamFail(status, code, message, nil)
 		return
 	}
 
-	if !req.Stream {
+	if !streaming {
 		writeJSON(w, http.StatusOK, domain.AgentProcessResponse{
 			Reply:  reply,
 			Events: events,
@@ -712,25 +899,230 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeErr(w, http.StatusInternalServerError, "stream_not_supported", "streaming not supported", nil)
-		return
-	}
-
-	for _, evt := range events {
-		payload, _ := json.Marshal(evt)
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
-		flusher.Flush()
-		if evt.Type == "assistant_delta" {
-			time.Sleep(20 * time.Millisecond)
-		}
-	}
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
+}
+
+type qqInboundEvent struct {
+	Text       string
+	UserID     string
+	SessionID  string
+	TargetType string
+	TargetID   string
+	MessageID  string
+}
+
+func parseQQInboundEvent(body []byte) (qqInboundEvent, error) {
+	raw := map[string]interface{}{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return qqInboundEvent{}, errors.New("invalid request body")
+	}
+
+	payload := raw
+	if nested, ok := qqMap(raw["d"]); ok {
+		payload = nested
+	} else if nested, ok := qqMap(raw["data"]); ok {
+		payload = nested
+	}
+
+	eventName := strings.ToUpper(qqFirst(
+		qqString(raw["event"]),
+		qqString(raw["event_type"]),
+		qqString(raw["type"]),
+		qqString(raw["t"]),
+	))
+	targetType, _ := normalizeQQTargetTypeAlias(strings.ToLower(eventName))
+	if targetType == "" {
+		targetType, _ = normalizeQQTargetTypeAlias(qqFirst(
+			qqString(payload["message_type"]),
+			qqString(payload["target_type"]),
+		))
+	}
+
+	switch eventName {
+	case "C2C_MESSAGE_CREATE":
+		targetType = "c2c"
+	case "GROUP_AT_MESSAGE_CREATE":
+		targetType = "group"
+	case "AT_MESSAGE_CREATE", "DIRECT_MESSAGE_CREATE":
+		targetType = "guild"
+	}
+	if targetType == "" {
+		return qqInboundEvent{}, errors.New("unsupported qq event type")
+	}
+
+	author, _ := qqMap(payload["author"])
+	sender, _ := qqMap(payload["sender"])
+	text := strings.TrimSpace(qqFirst(qqString(payload["content"]), qqString(payload["text"])))
+	if text == "" {
+		return qqInboundEvent{}, nil
+	}
+
+	event := qqInboundEvent{
+		Text:      text,
+		MessageID: strings.TrimSpace(qqString(payload["id"])),
+	}
+
+	switch targetType {
+	case "c2c":
+		senderID := strings.TrimSpace(qqFirst(
+			qqString(author["user_openid"]),
+			qqString(author["id"]),
+			qqString(sender["user_openid"]),
+			qqString(sender["id"]),
+			qqString(payload["user_id"]),
+		))
+		targetID := strings.TrimSpace(qqFirst(
+			qqString(payload["target_id"]),
+			senderID,
+		))
+		if targetID == "" {
+			return qqInboundEvent{}, errors.New("qq c2c event missing sender id")
+		}
+		userID := strings.TrimSpace(qqFirst(senderID, targetID))
+		sessionID := strings.TrimSpace(qqFirst(
+			qqString(payload["session_id"]),
+			fmt.Sprintf("qq:c2c:%s", targetID),
+		))
+		event.UserID = userID
+		event.SessionID = sessionID
+		event.TargetType = "c2c"
+		event.TargetID = targetID
+	case "group":
+		groupID := strings.TrimSpace(qqFirst(
+			qqString(payload["group_openid"]),
+			qqString(payload["target_id"]),
+			qqString(payload["group_id"]),
+		))
+		if groupID == "" {
+			return qqInboundEvent{}, errors.New("qq group event missing group_openid")
+		}
+		senderID := strings.TrimSpace(qqFirst(
+			qqString(author["member_openid"]),
+			qqString(author["user_openid"]),
+			qqString(author["id"]),
+			qqString(sender["id"]),
+			qqString(payload["user_id"]),
+		))
+		if senderID == "" {
+			senderID = groupID
+		}
+		sessionID := strings.TrimSpace(qqFirst(
+			qqString(payload["session_id"]),
+			fmt.Sprintf("qq:group:%s:%s", groupID, senderID),
+		))
+		event.UserID = senderID
+		event.SessionID = sessionID
+		event.TargetType = "group"
+		event.TargetID = groupID
+	case "guild":
+		channelID := strings.TrimSpace(qqFirst(
+			qqString(payload["channel_id"]),
+			qqString(payload["target_id"]),
+		))
+		if channelID == "" {
+			return qqInboundEvent{}, errors.New("qq guild event missing channel_id")
+		}
+		senderID := strings.TrimSpace(qqFirst(
+			qqString(author["id"]),
+			qqString(author["username"]),
+			qqString(sender["id"]),
+			qqString(payload["user_id"]),
+		))
+		if senderID == "" {
+			senderID = channelID
+		}
+		sessionID := strings.TrimSpace(qqFirst(
+			qqString(payload["session_id"]),
+			fmt.Sprintf("qq:guild:%s:%s", channelID, senderID),
+		))
+		event.UserID = senderID
+		event.SessionID = sessionID
+		event.TargetType = "guild"
+		event.TargetID = channelID
+	}
+
+	if event.UserID == "" || event.SessionID == "" || event.TargetID == "" {
+		return qqInboundEvent{}, errors.New("qq inbound event missing required fields")
+	}
+	return event, nil
+}
+
+func mergeChannelDispatchConfig(channelName string, cfg map[string]interface{}, bizParams map[string]interface{}) map[string]interface{} {
+	if channelName != "qq" || len(bizParams) == 0 {
+		return cfg
+	}
+	raw, ok := bizParams["channel"]
+	if !ok || raw == nil {
+		return cfg
+	}
+	body, ok := raw.(map[string]interface{})
+	if !ok {
+		return cfg
+	}
+	merged := cloneChannelConfig(cfg)
+	updated := false
+
+	if canonical, ok := normalizeQQTargetTypeAlias(qqString(body["target_type"])); ok {
+		merged["target_type"] = canonical
+		updated = true
+	}
+	if targetID := strings.TrimSpace(qqString(body["target_id"])); targetID != "" {
+		merged["target_id"] = targetID
+		updated = true
+	}
+	if msgID := strings.TrimSpace(qqString(body["msg_id"])); msgID != "" {
+		merged["msg_id"] = msgID
+		updated = true
+	}
+	if botPrefix := qqString(body["bot_prefix"]); strings.TrimSpace(botPrefix) != "" {
+		merged["bot_prefix"] = botPrefix
+		updated = true
+	}
+	if !updated {
+		return cfg
+	}
+	return merged
+}
+
+func qqMap(raw interface{}) (map[string]interface{}, bool) {
+	value, ok := raw.(map[string]interface{})
+	if !ok || value == nil {
+		return nil, false
+	}
+	return value, true
+}
+
+func qqString(raw interface{}) string {
+	switch value := raw.(type) {
+	case string:
+		return value
+	default:
+		return ""
+	}
+}
+
+func qqFirst(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func normalizeQQTargetTypeAlias(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "c2c", "user", "private":
+		return "c2c", true
+	case "group":
+		return "group", true
+	case "guild", "channel", "dm":
+		return "guild", true
+	default:
+		return "", false
+	}
 }
 
 func toRuntimeContents(in []domain.RuntimeContent) []domain.RuntimeContent {
@@ -765,6 +1157,9 @@ func (s *Server) listToolDefinitions() []runner.ToolDefinition {
 	}
 	names := make([]string, 0, len(s.tools))
 	for name := range s.tools {
+		if s.toolDisabled(name) {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -778,85 +1173,117 @@ func (s *Server) listToolDefinitions() []runner.ToolDefinition {
 
 func buildToolDefinition(name string) runner.ToolDefinition {
 	switch name {
-	case "read_file":
+	case "view":
 		return runner.ToolDefinition{
-			Name:        "read_file",
-			Description: "Read text content from a repository file path.",
+			Name:        "view",
+			Description: "Read line ranges for one or multiple files. input must be an array.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"path": map[string]interface{}{
-						"type":        "string",
-						"description": "Repository-relative file path.",
+					"items": map[string]interface{}{
+						"type":        "array",
+						"description": "Array of view operations; pass one item for single-file view.",
+						"minItems":    1,
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"path": map[string]interface{}{
+									"type":        "string",
+									"description": "Absolute file path on local filesystem.",
+								},
+								"start": map[string]interface{}{
+									"type":        "integer",
+									"minimum":     1,
+									"description": "1-based starting line number (inclusive).",
+								},
+								"end": map[string]interface{}{
+									"type":        "integer",
+									"minimum":     1,
+									"description": "1-based ending line number (inclusive).",
+								},
+							},
+							"required":             []string{"path", "start", "end"},
+							"additionalProperties": false,
+						},
 					},
 				},
-				"required":             []string{"path"},
+				"required":             []string{"items"},
 				"additionalProperties": false,
 			},
 		}
-	case "create_file":
+	case "edit":
 		return runner.ToolDefinition{
-			Name:        "create_file",
-			Description: "Create a new repository file with provided text content.",
+			Name:        "edit",
+			Description: "Replace line ranges for one or multiple files. input must be an array.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"path": map[string]interface{}{
-						"type":        "string",
-						"description": "Repository-relative file path.",
-					},
-					"content": map[string]interface{}{
-						"type":        "string",
-						"description": "File content to write.",
-					},
-				},
-				"required":             []string{"path", "content"},
-				"additionalProperties": false,
-			},
-		}
-	case "update_file":
-		return runner.ToolDefinition{
-			Name:        "update_file",
-			Description: "Update an existing repository file with overwrite or append mode.",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"path": map[string]interface{}{
-						"type":        "string",
-						"description": "Repository-relative file path.",
-					},
-					"content": map[string]interface{}{
-						"type":        "string",
-						"description": "Text content to write.",
-					},
-					"mode": map[string]interface{}{
-						"type": "string",
-						"enum": []string{"overwrite", "append"},
+					"items": map[string]interface{}{
+						"type":        "array",
+						"description": "Array of edit operations; pass one item for single-file edit.",
+						"minItems":    1,
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"path": map[string]interface{}{
+									"type":        "string",
+									"description": "Absolute file path on local filesystem.",
+								},
+								"start": map[string]interface{}{
+									"type":        "integer",
+									"minimum":     1,
+									"description": "1-based starting line number (inclusive).",
+								},
+								"end": map[string]interface{}{
+									"type":        "integer",
+									"minimum":     1,
+									"description": "1-based ending line number (inclusive).",
+								},
+								"content": map[string]interface{}{
+									"type":        "string",
+									"description": "Replacement text for the selected line range.",
+								},
+							},
+							"required":             []string{"path", "start", "end", "content"},
+							"additionalProperties": false,
+						},
 					},
 				},
-				"required":             []string{"path", "content"},
+				"required":             []string{"items"},
 				"additionalProperties": false,
 			},
 		}
 	case "shell":
 		return runner.ToolDefinition{
 			Name:        "shell",
-			Description: "Execute a shell command under server security controls.",
+			Description: "Execute one or multiple shell commands under server security controls. input must be an array.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"command": map[string]interface{}{
-						"type": "string",
-					},
-					"cwd": map[string]interface{}{
-						"type": "string",
-					},
-					"timeout_seconds": map[string]interface{}{
-						"type":    "integer",
-						"minimum": 1,
+					"items": map[string]interface{}{
+						"type":        "array",
+						"description": "Array of shell command operations; pass one item for single command.",
+						"minItems":    1,
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"command": map[string]interface{}{
+									"type": "string",
+								},
+								"cwd": map[string]interface{}{
+									"type": "string",
+								},
+								"timeout_seconds": map[string]interface{}{
+									"type":    "integer",
+									"minimum": 1,
+								},
+							},
+							"required":             []string{"command"},
+							"additionalProperties": false,
+						},
 					},
 				},
-				"required": []string{"command"},
+				"required": []string{"items"},
 			},
 		}
 	default:
@@ -933,6 +1360,49 @@ func summarizeAgentEventText(text string) string {
 	return string(runes[:160]) + "..."
 }
 
+func buildAssistantMessageMetadata(events []domain.AgentEvent) map[string]interface{} {
+	notices := make([]map[string]interface{}, 0, 2)
+	textOrder := 0
+	toolOrder := 0
+	for idx, evt := range events {
+		switch evt.Type {
+		case "assistant_delta":
+			if textOrder == 0 {
+				textOrder = idx + 1
+			}
+		case "tool_call":
+			if evt.ToolCall == nil {
+				continue
+			}
+			if toolOrder == 0 {
+				toolOrder = idx + 1
+			}
+			raw, err := json.Marshal(domain.AgentEvent{
+				Type:     "tool_call",
+				Step:     evt.Step,
+				ToolCall: evt.ToolCall,
+			})
+			if err != nil {
+				continue
+			}
+			notices = append(notices, map[string]interface{}{"raw": string(raw)})
+		}
+	}
+	if len(notices) == 0 {
+		return nil
+	}
+	out := map[string]interface{}{
+		"tool_call_notices": notices,
+	}
+	if textOrder > 0 {
+		out["text_order"] = textOrder
+	}
+	if toolOrder > 0 {
+		out["tool_order"] = toolOrder
+	}
+	return out
+}
+
 type channelError struct {
 	Code    string
 	Message string
@@ -990,7 +1460,14 @@ func (e *toolError) Unwrap() error {
 	return e.Err
 }
 
-func parseToolCall(bizParams map[string]interface{}) (toolCall, bool, error) {
+func parseToolCall(bizParams map[string]interface{}, rawRequest map[string]interface{}) (toolCall, bool, error) {
+	if call, ok, err := parseBizParamsToolCall(bizParams); ok || err != nil {
+		return call, ok, err
+	}
+	return parseShortcutToolCall(rawRequest)
+}
+
+func parseBizParamsToolCall(bizParams map[string]interface{}) (toolCall, bool, error) {
 	if len(bizParams) == 0 {
 		return toolCall{}, false, nil
 	}
@@ -1010,23 +1487,88 @@ func parseToolCall(bizParams map[string]interface{}) (toolCall, bool, error) {
 	if !ok {
 		return toolCall{}, false, errors.New("biz_params.tool.name must be a string")
 	}
-	name = strings.ToLower(strings.TrimSpace(name))
+	name = normalizeToolName(strings.ToLower(strings.TrimSpace(name)))
 	if name == "" {
 		return toolCall{}, false, errors.New("biz_params.tool.name cannot be empty")
 	}
-
-	input := map[string]interface{}{}
-	if rawInput, ok := toolBody["input"]; ok && rawInput != nil {
-		inputMap, ok := rawInput.(map[string]interface{})
-		if !ok {
-			return toolCall{}, false, errors.New("biz_params.tool.input must be an object")
+	rawInput, hasInput := toolBody["input"]
+	if !hasInput {
+		body := map[string]interface{}{}
+		for key, value := range toolBody {
+			if key == "name" {
+				continue
+			}
+			body[key] = value
 		}
-		input = inputMap
+		rawInput = body
 	}
-	return toolCall{Name: name, Input: safeMap(input)}, true, nil
+	input, err := parseToolPayload(rawInput, "biz_params.tool")
+	if err != nil {
+		return toolCall{}, false, err
+	}
+	return toolCall{Name: name, Input: input}, true, nil
+}
+
+func parseShortcutToolCall(rawRequest map[string]interface{}) (toolCall, bool, error) {
+	if len(rawRequest) == 0 {
+		return toolCall{}, false, nil
+	}
+	shortcuts := []string{"view", "edit", "shell"}
+	matched := make([]string, 0, 1)
+	for _, key := range shortcuts {
+		if raw, ok := rawRequest[key]; ok && raw != nil {
+			matched = append(matched, key)
+		}
+	}
+	if len(matched) == 0 {
+		return toolCall{}, false, nil
+	}
+	if len(matched) > 1 {
+		return toolCall{}, false, errors.New("only one shortcut tool key is allowed")
+	}
+	name := matched[0]
+	input, err := parseToolPayload(rawRequest[name], name)
+	if err != nil {
+		return toolCall{}, false, err
+	}
+	return toolCall{Name: normalizeToolName(name), Input: input}, true, nil
+}
+
+func parseToolPayload(raw interface{}, path string) (map[string]interface{}, error) {
+	if raw == nil {
+		return map[string]interface{}{}, nil
+	}
+	switch value := raw.(type) {
+	case []interface{}:
+		return map[string]interface{}{"items": value}, nil
+	case map[string]interface{}:
+		if nested, ok := value["input"]; ok {
+			return parseToolPayload(nested, path+".input")
+		}
+		return safeMap(value), nil
+	default:
+		return nil, fmt.Errorf("%s must be an object or array", path)
+	}
+}
+
+func normalizeToolName(name string) string {
+	switch name {
+	case "view_file_lines", "view_file_lins", "view_file":
+		return "view"
+	case "edit_file_lines", "edit_file_lins", "edit_file":
+		return "edit"
+	default:
+		return name
+	}
 }
 
 func (s *Server) executeToolCall(call toolCall) (string, error) {
+	if s.toolDisabled(call.Name) {
+		return "", &toolError{
+			Code:    "tool_disabled",
+			Message: fmt.Sprintf("tool %q is disabled by server config", call.Name),
+		}
+	}
 	plug, ok := s.tools[call.Name]
 	if !ok {
 		return "", &toolError{
@@ -2941,14 +3483,36 @@ func mapToolError(err error) (status int, code string, message string) {
 	var te *toolError
 	if errors.As(err, &te) {
 		switch te.Code {
+		case "tool_disabled":
+			return http.StatusForbidden, te.Code, te.Message
 		case "tool_not_supported":
 			return http.StatusBadRequest, te.Code, te.Message
 		case "tool_invoke_failed":
 			switch {
-			case errors.Is(te.Err, plugin.ErrShellToolDisabled):
-				return http.StatusForbidden, "tool_disabled", "tool is disabled by server config"
 			case errors.Is(te.Err, plugin.ErrShellToolCommandMissing):
 				return http.StatusBadRequest, "invalid_tool_input", "tool input command is required"
+			case errors.Is(te.Err, plugin.ErrShellToolItemsInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input items must be a non-empty array of objects"
+			case errors.Is(te.Err, plugin.ErrFileLinesToolPathMissing):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input path is required"
+			case errors.Is(te.Err, plugin.ErrFileLinesToolPathInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input path is invalid"
+			case errors.Is(te.Err, plugin.ErrFileLinesToolItemsInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input items must be a non-empty array of objects"
+			case errors.Is(te.Err, plugin.ErrFileLinesToolStartInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input start must be an integer >= 1"
+			case errors.Is(te.Err, plugin.ErrFileLinesToolEndInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input end must be an integer >= 1"
+			case errors.Is(te.Err, plugin.ErrFileLinesToolRangeInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input line range is invalid"
+			case errors.Is(te.Err, plugin.ErrFileLinesToolRangeTooLarge):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input line range is too large"
+			case errors.Is(te.Err, plugin.ErrFileLinesToolContentMissing):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input content is required"
+			case errors.Is(te.Err, plugin.ErrFileLinesToolOutOfRange):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input line range is out of file bounds"
+			case errors.Is(te.Err, plugin.ErrFileLinesToolFileNotFound):
+				return http.StatusBadRequest, "invalid_tool_input", "target file does not exist"
 			default:
 				return http.StatusBadGateway, te.Code, te.Message
 			}
@@ -2959,6 +3523,28 @@ func mapToolError(err error) (status int, code string, message string) {
 		}
 	}
 	return http.StatusInternalServerError, "tool_error", "tool execution failed"
+}
+
+func formatToolErrorFeedback(err error) string {
+	if err == nil {
+		return "tool_error code=tool_error message=tool execution failed"
+	}
+	_, code, message := mapToolError(err)
+	if strings.TrimSpace(code) == "" {
+		code = "tool_error"
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "tool execution failed"
+	}
+	detail := strings.TrimSpace(err.Error())
+	if detail == "" {
+		return fmt.Sprintf("tool_error code=%s message=%s", code, message)
+	}
+	detail = strings.Join(strings.Fields(detail), " ")
+	if detail == message {
+		return fmt.Sprintf("tool_error code=%s message=%s", code, message)
+	}
+	return fmt.Sprintf("tool_error code=%s message=%s detail=%s", code, message, detail)
 }
 
 func (s *Server) collectProviderCatalog() ([]domain.ProviderInfo, map[string]string, domain.ModelSlotConfig) {

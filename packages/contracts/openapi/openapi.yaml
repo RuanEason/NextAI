@@ -82,6 +82,24 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AgentProcessResponse' }
+  /channels/qq/inbound:
+    post:
+      summary: Accept QQ inbound event and dispatch to agent process
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
   /cron/jobs:
     get:
       responses:
@@ -388,14 +406,31 @@ paths:
   /config/channels:
     get:
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelConfigMap' }
     put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelConfigMap' }
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelConfigMap' }
   /config/channels/types:
     get:
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelTypeList' }
   /config/channels/{channel_name}:
     get:
       parameters:
@@ -404,15 +439,28 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelConfig' }
     put:
       parameters:
         - in: path
           name: channel_name
           required: true
           schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelConfig' }
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelConfig' }
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -727,12 +775,26 @@ components:
           type: object
           additionalProperties: { type: string }
         channels:
-          type: object
-          additionalProperties:
-            type: object
-            additionalProperties: true
+          $ref: '#/components/schemas/ChannelConfigMap'
         models: { $ref: '#/components/schemas/WorkspaceExportModels' }
       required: [envs, channels, models]
+    ChannelTypeList:
+      type: array
+      items:
+        type: string
+      example: [console, webhook, qq]
+    ChannelConfigMap:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/ChannelConfig'
+    ChannelConfig:
+      type: object
+      description: |
+        渠道配置对象。不同 channel 名称拥有不同字段：
+        - console: enabled, bot_prefix
+        - webhook: enabled, url, method, headers, timeout_seconds
+        - qq: enabled, app_id, client_secret, bot_prefix, target_type(c2c/group/guild), target_id, api_base, token_url, timeout_seconds
+      additionalProperties: true
     WorkspaceExportPayload:
       type: object
       properties:

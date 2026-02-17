@@ -77,6 +77,17 @@ func defaultState(dataDir string) State {
 				"headers":         map[string]interface{}{},
 				"timeout_seconds": 5,
 			},
+			"qq": {
+				"enabled":         false,
+				"app_id":          "",
+				"client_secret":   "",
+				"bot_prefix":      "",
+				"target_type":     "c2c",
+				"target_id":       "",
+				"api_base":        "https://api.sgroup.qq.com",
+				"token_url":       "https://bots.qq.com/app/getAppAccessToken",
+				"timeout_seconds": 8,
+			},
 		},
 	}
 }
@@ -158,6 +169,19 @@ func (s *Store) load() error {
 			"method":          "POST",
 			"headers":         map[string]interface{}{},
 			"timeout_seconds": 5,
+		}
+	}
+	if _, ok := state.Channels["qq"]; !ok {
+		state.Channels["qq"] = map[string]interface{}{
+			"enabled":         false,
+			"app_id":          "",
+			"client_secret":   "",
+			"bot_prefix":      "",
+			"target_type":     "c2c",
+			"target_id":       "",
+			"api_base":        "https://api.sgroup.qq.com",
+			"token_url":       "https://bots.qq.com/app/getAppAccessToken",
+			"timeout_seconds": 8,
 		}
 	}
 	s.state = state

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"copaw-next/apps/gateway/internal/domain"
@@ -175,7 +177,7 @@ func TestGenerateTurnOpenAIToolCalls(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"docs/contracts.md\"}"}}]}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"view","arguments":"{\"path\":\"docs/contracts.md\",\"start\":1,\"end\":5}"}}]}}]}`))
 	}))
 	defer mock.Close()
 
@@ -184,7 +186,7 @@ func TestGenerateTurnOpenAIToolCalls(t *testing.T) {
 		Input: []domain.AgentInputMessage{{
 			Role:    "user",
 			Type:    "message",
-			Content: []domain.RuntimeContent{{Type: "text", Text: "read docs/contracts.md"}},
+			Content: []domain.RuntimeContent{{Type: "text", Text: "view docs/contracts.md lines 1-5"}},
 		}},
 	}, GenerateConfig{
 		ProviderID: ProviderOpenAI,
@@ -193,13 +195,19 @@ func TestGenerateTurnOpenAIToolCalls(t *testing.T) {
 		BaseURL:    mock.URL,
 	}, []ToolDefinition{
 		{
-			Name: "read_file",
+			Name: "view",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"path": map[string]interface{}{"type": "string"},
+					"start": map[string]interface{}{
+						"type": "integer",
+					},
+					"end": map[string]interface{}{
+						"type": "integer",
+					},
 				},
-				"required": []string{"path"},
+				"required": []string{"path", "start", "end"},
 			},
 		},
 	})
@@ -209,11 +217,14 @@ func TestGenerateTurnOpenAIToolCalls(t *testing.T) {
 	if len(turn.ToolCalls) != 1 {
 		t.Fatalf("expected 1 tool call, got=%d", len(turn.ToolCalls))
 	}
-	if turn.ToolCalls[0].Name != "read_file" {
+	if turn.ToolCalls[0].Name != "view" {
 		t.Fatalf("unexpected tool name: %q", turn.ToolCalls[0].Name)
 	}
 	if got := turn.ToolCalls[0].Arguments["path"]; got != "docs/contracts.md" {
 		t.Fatalf("unexpected tool argument path: %#v", got)
+	}
+	if got := turn.ToolCalls[0].Arguments["start"]; got != float64(1) {
+		t.Fatalf("unexpected tool argument start: %#v", got)
 	}
 
 	rawTools, ok := requestBody["tools"].([]interface{})
@@ -297,6 +308,101 @@ func TestGenerateTurnSerializesAssistantToolMessages(t *testing.T) {
 	toolMsg, _ := messages[2].(map[string]interface{})
 	if toolMsg["tool_call_id"] != "call_abc" {
 		t.Fatalf("unexpected tool_call_id: %#v", toolMsg["tool_call_id"])
+	}
+}
+
+func TestGenerateTurnStreamOpenAISendsNativeDeltas(t *testing.T) {
+	t.Parallel()
+	var requestBody map[string]interface{}
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer mock.Close()
+
+	r := NewWithHTTPClient(mock.Client())
+	var streamed []string
+	turn, err := r.GenerateTurnStream(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "text", Text: "hello"}},
+		}},
+	}, GenerateConfig{
+		ProviderID: ProviderOpenAI,
+		Model:      "gpt-4o-mini",
+		APIKey:     "sk-test",
+		BaseURL:    mock.URL,
+	}, nil, func(delta string) {
+		streamed = append(streamed, delta)
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if turn.Text != "hello" {
+		t.Fatalf("unexpected turn text: %q", turn.Text)
+	}
+	if got := strings.Join(streamed, ""); got != "hello" {
+		t.Fatalf("unexpected streamed deltas: %q", got)
+	}
+	if len(turn.ToolCalls) != 0 {
+		t.Fatalf("expected no tool calls, got=%d", len(turn.ToolCalls))
+	}
+	if got, ok := requestBody["stream"].(bool); !ok || !got {
+		t.Fatalf("expected stream=true in request, got=%#v", requestBody["stream"])
+	}
+}
+
+func TestGenerateTurnStreamOpenAIAggregatesToolCalls(t *testing.T) {
+	t.Parallel()
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"ec\"}}]}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ho hi\\\"}\"}}]}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer mock.Close()
+
+	r := NewWithHTTPClient(mock.Client())
+	turn, err := r.GenerateTurnStream(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "text", Text: "say hi"}},
+		}},
+	}, GenerateConfig{
+		ProviderID: ProviderOpenAI,
+		Model:      "gpt-4o-mini",
+		APIKey:     "sk-test",
+		BaseURL:    mock.URL,
+	}, []ToolDefinition{{Name: "shell"}}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if turn.Text != "" {
+		t.Fatalf("expected empty text, got=%q", turn.Text)
+	}
+	if len(turn.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got=%d", len(turn.ToolCalls))
+	}
+	if turn.ToolCalls[0].Name != "shell" {
+		t.Fatalf("unexpected tool name: %q", turn.ToolCalls[0].Name)
+	}
+	if got := turn.ToolCalls[0].Arguments["command"]; got != "echo hi" {
+		t.Fatalf("unexpected tool argument command: %#v", got)
 	}
 }
 
