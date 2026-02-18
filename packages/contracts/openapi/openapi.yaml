@@ -1,0 +1,842 @@
+openapi: 3.0.3
+info:
+  title: NextAI API
+  version: 0.1.0
+servers:
+  - url: http://127.0.0.1:8088
+security:
+  - ApiKeyAuth: []
+paths:
+  /version:
+    get:
+      security: []
+      responses:
+        '200':
+          description: version
+  /healthz:
+    get:
+      security: []
+      responses:
+        '200':
+          description: health
+  /chats:
+    get:
+      parameters:
+        - in: query
+          name: user_id
+          schema: { type: string }
+        - in: query
+          name: channel
+          schema: { type: string }
+      responses:
+        '200': { description: ok }
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChatSpec' }
+      responses:
+        '200': { description: ok }
+  /chats/batch-delete:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { type: string }
+      responses:
+        '200': { description: ok }
+  /chats/{chat_id}:
+    parameters:
+      - in: path
+        name: chat_id
+        required: true
+        schema: { type: string }
+    get:
+      responses:
+        '200': { description: ok }
+    put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChatSpec' }
+      responses:
+        '200': { description: ok }
+    delete:
+      responses:
+        '200': { description: ok }
+  /agent/process:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AgentProcessRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentProcessResponse' }
+  /channels/qq/inbound:
+    post:
+      summary: Accept QQ inbound event and dispatch to agent process
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /channels/qq/state:
+    get:
+      summary: Get QQ inbound websocket runtime state
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /cron/jobs:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CronJobSpec' }
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CronJobSpec' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CronJobSpec' }
+  /cron/jobs/{job_id}:
+    parameters:
+      - in: path
+        name: job_id
+        required: true
+        schema: { type: string }
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CronJobView' }
+    put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CronJobSpec' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CronJobSpec' }
+    delete:
+      responses:
+        '200': { description: ok }
+  /cron/jobs/{job_id}/pause:
+    post:
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CronBoolResult' }
+  /cron/jobs/{job_id}/resume:
+    post:
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CronBoolResult' }
+  /cron/jobs/{job_id}/run:
+    post:
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  started: { type: boolean }
+                required: [started]
+  /cron/jobs/{job_id}/state:
+    get:
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CronJobState' }
+  /models:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ProviderInfo' }
+  /models/catalog:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelCatalogInfo' }
+  /models/{provider_id}/config:
+    put:
+      parameters:
+        - in: path
+          name: provider_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProviderConfigPatch' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProviderInfo' }
+  /models/{provider_id}:
+    delete:
+      parameters:
+        - in: path
+          name: provider_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeleteResult' }
+  /models/active:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActiveModelsInfo' }
+    put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModelSlotConfig' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActiveModelsInfo' }
+  /envs:
+    get:
+      responses:
+        '200': { description: ok }
+    put:
+      responses:
+        '200': { description: ok }
+  /envs/{key}:
+    delete:
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: ok }
+  /skills:
+    get:
+      responses:
+        '200': { description: ok }
+    post:
+      responses:
+        '200': { description: ok }
+  /skills/available:
+    get:
+      responses:
+        '200': { description: ok }
+  /skills/batch-disable:
+    post:
+      responses:
+        '200': { description: ok }
+  /skills/batch-enable:
+    post:
+      responses:
+        '200': { description: ok }
+  /skills/{skill_name}/disable:
+    post:
+      parameters:
+        - in: path
+          name: skill_name
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: ok }
+  /skills/{skill_name}/enable:
+    post:
+      parameters:
+        - in: path
+          name: skill_name
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: ok }
+  /skills/{skill_name}:
+    delete:
+      parameters:
+        - in: path
+          name: skill_name
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: ok }
+  /skills/{skill_name}/files/{source}/{file_path}:
+    get:
+      parameters:
+        - in: path
+          name: skill_name
+          required: true
+          schema: { type: string }
+        - in: path
+          name: source
+          required: true
+          schema: { type: string }
+        - in: path
+          name: file_path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: ok }
+  /workspace/files:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceFileListResponse' }
+  /workspace/files/{file_path}:
+    parameters:
+      - in: path
+        name: file_path
+        required: true
+        schema: { type: string }
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+    put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: ok }
+    delete:
+      responses:
+        '200': { description: ok }
+  /workspace/export:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceExportPayload' }
+  /workspace/import:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WorkspaceImportRequest' }
+      responses:
+        '200': { description: ok }
+  /config/channels:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelConfigMap' }
+    put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelConfigMap' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelConfigMap' }
+  /config/channels/types:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelTypeList' }
+  /config/channels/{channel_name}:
+    get:
+      parameters:
+        - in: path
+          name: channel_name
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelConfig' }
+    put:
+      parameters:
+        - in: path
+          name: channel_name
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelConfig' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelConfig' }
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  schemas:
+    ChatSpec:
+      type: object
+      properties:
+        id: { type: string, minLength: 1 }
+        name: { type: string, minLength: 1 }
+        session_id: { type: string, minLength: 1 }
+        user_id: { type: string, minLength: 1 }
+        channel: { type: string, minLength: 1 }
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+        meta: { type: object, additionalProperties: true, default: {} }
+      required: [session_id, user_id, channel]
+    RuntimeContent:
+      type: object
+      properties:
+        type: { type: string, enum: [text] }
+        text: { type: string }
+      required: [type]
+    AgentInputMessage:
+      type: object
+      properties:
+        role: { type: string, enum: [system, user, assistant, tool] }
+        type: { type: string, enum: [message] }
+        content:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/RuntimeContent' }
+        metadata:
+          type: object
+          additionalProperties: true
+      required: [role, type, content]
+    AgentProcessRequest:
+      type: object
+      properties:
+        input:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AgentInputMessage' }
+        session_id: { type: string, minLength: 1 }
+        user_id: { type: string, minLength: 1 }
+        channel:
+          type: string
+          minLength: 1
+          description: Optional. If omitted, Gateway auto-detects channel by request source (web/cli -> console, qq inbound -> qq).
+        stream: { type: boolean }
+        biz_params:
+          type: object
+          description: Business extension params. Tool calls are sent via biz_params.tool.
+          additionalProperties: true
+          properties:
+            tool:
+              $ref: '#/components/schemas/AgentToolCall'
+      required: [input, session_id, user_id, stream]
+    AgentToolCall:
+      type: object
+      properties:
+        name:
+          type: string
+          enum: [shell]
+        input:
+          type: object
+          additionalProperties: true
+      required: [name, input]
+    AgentToolCallPayload:
+      type: object
+      properties:
+        name: { type: string }
+        input:
+          type: object
+          additionalProperties: true
+      required: [name]
+    AgentToolResultPayload:
+      type: object
+      properties:
+        name: { type: string }
+        ok: { type: boolean }
+        summary: { type: string }
+      required: [name, ok]
+    AgentEvent:
+      type: object
+      properties:
+        type: { type: string }
+        step: { type: integer, minimum: 1 }
+        delta: { type: string }
+        reply: { type: string }
+        tool_call: { $ref: '#/components/schemas/AgentToolCallPayload' }
+        tool_result: { $ref: '#/components/schemas/AgentToolResultPayload' }
+        meta:
+          type: object
+          additionalProperties: true
+      required: [type]
+    AgentProcessResponse:
+      type: object
+      properties:
+        reply: { type: string }
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/AgentEvent' }
+      required: [reply]
+    CronJobSpec:
+      type: object
+      properties:
+        id: { type: string, minLength: 1 }
+        name: { type: string, minLength: 1 }
+        enabled: { type: boolean }
+        schedule: { $ref: '#/components/schemas/CronScheduleSpec' }
+        task_type: { type: string, minLength: 1 }
+        text: { type: string }
+        request:
+          type: object
+          additionalProperties: true
+        dispatch: { $ref: '#/components/schemas/CronDispatchSpec' }
+        runtime: { $ref: '#/components/schemas/CronRuntimeSpec' }
+        meta:
+          type: object
+          additionalProperties: true
+          default: {}
+      required: [id, name, enabled, schedule, task_type, dispatch, runtime]
+    CronScheduleSpec:
+      type: object
+      properties:
+        type: { type: string, enum: [interval, cron] }
+        cron: { type: string, minLength: 1 }
+        timezone: { type: string }
+      required: [cron]
+    CronDispatchTarget:
+      type: object
+      properties:
+        user_id: { type: string, minLength: 1 }
+        session_id: { type: string, minLength: 1 }
+      required: [user_id, session_id]
+    CronDispatchSpec:
+      type: object
+      properties:
+        type: { type: string }
+        channel: { type: string }
+        target: { $ref: '#/components/schemas/CronDispatchTarget' }
+        mode: { type: string }
+        meta:
+          type: object
+          additionalProperties: true
+          default: {}
+      required: [target]
+    CronRuntimeSpec:
+      type: object
+      properties:
+        max_concurrency: { type: integer, minimum: 1, default: 1 }
+        timeout_seconds: { type: integer, minimum: 1, default: 30 }
+        misfire_grace_seconds: { type: integer, minimum: 0, default: 0 }
+    CronJobState:
+      type: object
+      properties:
+        next_run_at: { type: string, format: date-time, nullable: true }
+        last_run_at: { type: string, format: date-time, nullable: true }
+        last_status:
+          type: string
+          enum: [paused, resumed, running, succeeded, failed]
+          nullable: true
+        last_error: { type: string, nullable: true }
+        paused: { type: boolean }
+    CronJobView:
+      type: object
+      properties:
+        spec: { $ref: '#/components/schemas/CronJobSpec' }
+        state: { $ref: '#/components/schemas/CronJobState' }
+      required: [spec, state]
+    CronBoolResult:
+      type: object
+      additionalProperties:
+        type: boolean
+    ModelSlotConfig:
+      type: object
+      properties:
+        provider_id: { type: string, minLength: 1 }
+        model: { type: string, minLength: 1 }
+      required: [provider_id, model]
+    ActiveModelsInfo:
+      type: object
+      properties:
+        active_llm: { $ref: '#/components/schemas/ActiveModelSlotConfig' }
+      required: [active_llm]
+    ActiveModelSlotConfig:
+      type: object
+      properties:
+        provider_id: { type: string }
+        model: { type: string }
+      required: [provider_id, model]
+    ModelModalities:
+      type: object
+      properties:
+        text: { type: boolean }
+        audio: { type: boolean }
+        image: { type: boolean }
+        video: { type: boolean }
+        pdf: { type: boolean }
+      required: [text, audio, image, video, pdf]
+    ModelCapabilities:
+      type: object
+      properties:
+        temperature: { type: boolean }
+        reasoning: { type: boolean }
+        attachment: { type: boolean }
+        tool_call: { type: boolean }
+        input: { $ref: '#/components/schemas/ModelModalities' }
+        output: { $ref: '#/components/schemas/ModelModalities' }
+      required: [temperature, reasoning, attachment, tool_call]
+    ModelLimit:
+      type: object
+      properties:
+        context: { type: integer, minimum: 0 }
+        input: { type: integer, minimum: 0 }
+        output: { type: integer, minimum: 0 }
+    ModelInfo:
+      type: object
+      properties:
+        id: { type: string, minLength: 1 }
+        name: { type: string, minLength: 1 }
+        status:
+          type: string
+          enum: [active, alpha, beta, deprecated]
+        alias_of: { type: string }
+        capabilities: { $ref: '#/components/schemas/ModelCapabilities' }
+        limit: { $ref: '#/components/schemas/ModelLimit' }
+      required: [id, name]
+    ProviderInfo:
+      type: object
+      properties:
+        id: { type: string, minLength: 1 }
+        name: { type: string, minLength: 1 }
+        display_name: { type: string, minLength: 1 }
+        openai_compatible: { type: boolean }
+        api_key_prefix: { type: string, minLength: 1 }
+        models:
+          type: array
+          items: { $ref: '#/components/schemas/ModelInfo' }
+        allow_custom_base_url: { type: boolean }
+        enabled: { type: boolean }
+        has_api_key: { type: boolean }
+        current_api_key: { type: string }
+        current_base_url: { type: string }
+      required:
+        [id, name, display_name, openai_compatible, api_key_prefix, models, allow_custom_base_url, enabled, has_api_key, current_api_key, current_base_url]
+    ProviderTypeInfo:
+      type: object
+      properties:
+        id: { type: string, minLength: 1 }
+        display_name: { type: string, minLength: 1 }
+      required: [id, display_name]
+    ProviderConfigPatch:
+      type: object
+      properties:
+        api_key: { type: string }
+        base_url: { type: string }
+        display_name: { type: string }
+        enabled: { type: boolean }
+        headers:
+          type: object
+          additionalProperties: { type: string }
+        timeout_ms: { type: integer, minimum: 0 }
+        model_aliases:
+          type: object
+          additionalProperties: { type: string }
+    DeleteResult:
+      type: object
+      properties:
+        deleted: { type: boolean }
+      required: [deleted]
+    ModelCatalogInfo:
+      type: object
+      properties:
+        providers:
+          type: array
+          items: { $ref: '#/components/schemas/ProviderInfo' }
+        provider_types:
+          type: array
+          items: { $ref: '#/components/schemas/ProviderTypeInfo' }
+        defaults:
+          type: object
+          additionalProperties: { type: string }
+        active_llm: { $ref: '#/components/schemas/ActiveModelSlotConfig' }
+      required: [providers, provider_types, defaults, active_llm]
+    WorkspaceFileEntry:
+      type: object
+      properties:
+        path: { type: string, minLength: 1 }
+        kind: { type: string, enum: [config, skill] }
+        size: { type: integer, minimum: 0 }
+      required: [path, kind, size]
+    WorkspaceFileListResponse:
+      type: object
+      properties:
+        files:
+          type: array
+          items: { $ref: '#/components/schemas/WorkspaceFileEntry' }
+      required: [files]
+    WorkspaceExportModels:
+      type: object
+      properties:
+        providers:
+          type: object
+          additionalProperties: { $ref: '#/components/schemas/ProviderConfigPatch' }
+        active_llm: { $ref: '#/components/schemas/ActiveModelSlotConfig' }
+      required: [providers, active_llm]
+    WorkspaceExportConfig:
+      type: object
+      properties:
+        envs:
+          type: object
+          additionalProperties: { type: string }
+        channels:
+          $ref: '#/components/schemas/ChannelConfigMap'
+        models: { $ref: '#/components/schemas/WorkspaceExportModels' }
+      required: [envs, channels, models]
+    ChannelTypeList:
+      type: array
+      items:
+        type: string
+      example: [console, webhook, qq]
+    ChannelConfigMap:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/ChannelConfig'
+    ChannelConfig:
+      type: object
+      description: |
+        渠道配置对象。不同 channel 名称拥有不同字段：
+        - console: enabled, bot_prefix
+        - webhook: enabled, url, method, headers, timeout_seconds
+        - qq: enabled, app_id, client_secret, bot_prefix, target_type(c2c/group/guild), target_id, api_base, token_url, timeout_seconds
+      additionalProperties: true
+    WorkspaceExportPayload:
+      type: object
+      properties:
+        version: { type: string, minLength: 1 }
+        skills:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/SkillSpec'
+        config: { $ref: '#/components/schemas/WorkspaceExportConfig' }
+      required: [version, skills, config]
+    WorkspaceImportRequest:
+      type: object
+      properties:
+        mode: { type: string, enum: [replace] }
+        payload: { $ref: '#/components/schemas/WorkspaceExportPayload' }
+      required: [mode, payload]
+    SkillSpec:
+      type: object
+      properties:
+        name: { type: string }
+        content: { type: string }
+        source: { type: string }
+        path: { type: string }
+        references:
+          type: object
+          additionalProperties: true
+        scripts:
+          type: object
+          additionalProperties: true
+        enabled: { type: boolean }
+      required: [name, content, source, path, references, scripts, enabled]

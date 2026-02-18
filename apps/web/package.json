@@ -1,0 +1,14 @@
+{
+  "name": "@nextai/web",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "rm -rf dist && mkdir -p dist && pnpm exec tsc -p tsconfig.json && cp src/index.html dist/index.html && cp src/styles.css dist/styles.css",
+    "test": "vitest run",
+    "lint": "pnpm exec tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "jsdom": "^28.1.0",
+    "vitest": "^4.0.18"
+  }
+}

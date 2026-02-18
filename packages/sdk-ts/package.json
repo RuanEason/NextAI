@@ -1,0 +1,16 @@
+{
+  "name": "@nextai/sdk-ts",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "generate": "node scripts/generate-from-openapi.mjs",
+    "generate:check": "node scripts/generate-from-openapi.mjs --check",
+    "build": "pnpm run generate && node -e \"console.log('sdk build placeholder')\"",
+    "test": "node --test test/*.test.mjs",
+    "lint": "pnpm run generate:check"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  }
+}

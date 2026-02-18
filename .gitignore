@@ -1,0 +1,19 @@
+# Node
+node_modules/
+dist/
+coverage/
+.pnpm-store/
+
+# Go
+bin/
+*.out
+apps/gateway/gateway
+
+# Runtime data
+.data/
+.env
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
