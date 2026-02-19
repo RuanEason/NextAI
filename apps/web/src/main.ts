@@ -2,11 +2,15 @@ import { parseErrorMessage } from "./api-utils.js";
 import { DEFAULT_LOCALE, getLocale, isWebMessageKey, setLocale, t } from "./i18n.js";
 
 type Tone = "neutral" | "info" | "error";
-type TabKey = "chat" | "search" | "models" | "channels" | "workspace" | "cron";
+type TabKey = "chat" | "cron";
+type SettingsSectionKey = "connection" | "identity" | "display" | "models" | "channels" | "workspace";
+type ModelsSettingsLevel = "list" | "edit";
 type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 type ProviderKVKind = "headers" | "aliases";
 type WorkspaceEditorMode = "json" | "text";
 type CronModalMode = "create" | "edit";
+
+const TRASH_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M7 21q-.825 0-1.412-.587T5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413T17 21zM17 6H7v13h10zM9 17h2V8H9zm4 0h2V8h-2zM7 6v13z"/></svg>`;
 
 interface ChatSpec {
   id: string;
@@ -249,11 +253,12 @@ const REQUEST_SOURCE_WEB = "web";
 const SETTINGS_KEY = "nextai.web.chat.settings";
 const LOCALE_KEY = "nextai.web.locale";
 const BUILTIN_PROVIDER_IDS = new Set(["openai"]);
-const TABS: TabKey[] = ["chat", "search", "models", "channels", "workspace", "cron"];
+const TABS: TabKey[] = ["chat", "cron"];
 const customSelectInstances = new Map<HTMLSelectElement, CustomSelectInstance>();
 let customSelectGlobalEventsBound = false;
 let chatLiveRefreshTimer: number | null = null;
 let chatLiveRefreshInFlight = false;
+let activeSettingsSection: SettingsSectionKey = "models";
 
 const apiBaseInput = mustElement<HTMLInputElement>("api-base");
 const apiKeyInput = mustElement<HTMLInputElement>("api-key");
@@ -264,15 +269,17 @@ const reloadChatsButton = mustElement<HTMLButtonElement>("reload-chats");
 const settingsToggleButton = mustElement<HTMLButtonElement>("settings-toggle");
 const settingsPopover = mustElement<HTMLElement>("settings-popover");
 const settingsPopoverCloseButton = mustElement<HTMLButtonElement>("settings-popover-close");
+const chatSearchToggleButton = mustElement<HTMLButtonElement>("chat-search-toggle");
+const searchModal = mustElement<HTMLElement>("search-modal");
+const searchModalCloseButton = mustElement<HTMLButtonElement>("search-modal-close-btn");
+const modelsSettingsSection = mustElement<HTMLElement>("settings-section-models");
+const settingsSectionButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-settings-section]"));
+const settingsSectionPanels = Array.from(document.querySelectorAll<HTMLElement>("[data-settings-section-panel]"));
 const statusLine = mustElement<HTMLElement>("status-line");
 
 const tabButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".tab-btn"));
 
 const panelChat = mustElement<HTMLElement>("panel-chat");
-const panelSearch = mustElement<HTMLElement>("panel-search");
-const panelModels = mustElement<HTMLElement>("panel-models");
-const panelChannels = mustElement<HTMLElement>("panel-channels");
-const panelWorkspace = mustElement<HTMLElement>("panel-workspace");
 const panelCron = mustElement<HTMLElement>("panel-cron");
 
 const newChatButton = mustElement<HTMLButtonElement>("new-chat");
@@ -288,21 +295,19 @@ const sendButton = mustElement<HTMLButtonElement>("send-btn");
 
 const refreshModelsButton = mustElement<HTMLButtonElement>("refresh-models");
 const modelsAddProviderButton = mustElement<HTMLButtonElement>("models-add-provider-btn");
-const modelsActiveForm = mustElement<HTMLFormElement>("models-active-form");
-const modelsActiveProviderSelect = mustElement<HTMLSelectElement>("models-active-provider-select");
-const modelsActiveModelSelect = mustElement<HTMLSelectElement>("models-active-model-select");
-const modelsActiveModelManualInput = mustElement<HTMLInputElement>("models-active-model-manual-input");
-const modelsSetActiveButton = mustElement<HTMLButtonElement>("models-set-active-btn");
-const modelsActiveSummary = mustElement<HTMLElement>("models-active-summary");
 const modelsProviderList = mustElement<HTMLUListElement>("models-provider-list");
-const modelsProviderModal = mustElement<HTMLElement>("models-provider-modal");
+const modelsLevel1View = mustElement<HTMLElement>("models-level1-view");
+const modelsLevel2View = mustElement<HTMLElement>("models-level2-view");
+const modelsEditProviderMeta = mustElement<HTMLElement>("models-edit-provider-meta");
 const modelsProviderModalTitle = mustElement<HTMLElement>("models-provider-modal-title");
-const modelsProviderModalCloseButton = mustElement<HTMLButtonElement>("models-provider-modal-close-btn");
 const modelsProviderForm = mustElement<HTMLFormElement>("models-provider-form");
 const modelsProviderTypeSelect = mustElement<HTMLSelectElement>("models-provider-type-select");
 const modelsProviderNameInput = mustElement<HTMLInputElement>("models-provider-name-input");
 const modelsProviderAPIKeyInput = mustElement<HTMLInputElement>("models-provider-api-key-input");
+const modelsProviderAPIKeyVisibilityButton = mustElement<HTMLButtonElement>("models-provider-api-key-visibility-btn");
+const modelsProviderTestButton = mustElement<HTMLButtonElement>("models-provider-test-btn");
 const modelsProviderBaseURLInput = mustElement<HTMLInputElement>("models-provider-base-url-input");
+const modelsProviderBaseURLPreview = mustElement<HTMLElement>("models-provider-base-url-preview");
 const modelsProviderTimeoutMSInput = mustElement<HTMLInputElement>("models-provider-timeout-ms-input");
 const modelsProviderEnabledInput = mustElement<HTMLInputElement>("models-provider-enabled-input");
 const modelsProviderHeadersRows = mustElement<HTMLElement>("models-provider-headers-rows");
@@ -312,6 +317,8 @@ const modelsProviderAliasesAddButton = mustElement<HTMLButtonElement>("models-pr
 const modelsProviderCustomModelsField = mustElement<HTMLElement>("models-provider-custom-models-field");
 const modelsProviderCustomModelsRows = mustElement<HTMLElement>("models-provider-custom-models-rows");
 const modelsProviderCustomModelsAddButton = mustElement<HTMLButtonElement>("models-provider-custom-models-add-btn");
+const modelsProviderModelsManageButton = mustElement<HTMLButtonElement>("models-provider-models-manage-btn");
+const modelsProviderModelsBody = mustElement<HTMLElement>("models-provider-models-body");
 const modelsProviderCancelButton = mustElement<HTMLButtonElement>("models-provider-cancel-btn");
 
 const refreshWorkspaceButton = mustElement<HTMLButtonElement>("refresh-workspace");
@@ -363,10 +370,6 @@ const cronSubmitButton = mustElement<HTMLButtonElement>("cron-submit-btn");
 
 const panelByTab: Record<TabKey, HTMLElement> = {
   chat: panelChat,
-  search: panelSearch,
-  models: panelModels,
-  channels: panelChannels,
-  workspace: panelWorkspace,
   cron: panelCron,
 };
 
@@ -378,7 +381,6 @@ const state = {
   activeTab: "chat" as TabKey,
   tabLoaded: {
     chat: true,
-    search: true,
     models: false,
     channels: false,
     workspace: false,
@@ -397,6 +399,10 @@ const state = {
   providerTypes: [] as ProviderTypeInfo[],
   modelDefaults: {} as Record<string, string>,
   activeLLM: { provider_id: "", model: "" } as ModelSlotConfig,
+  selectedProviderID: "",
+  modelsSettingsLevel: "list" as ModelsSettingsLevel,
+  providerModelsManageOpen: false,
+  providerAPIKeyVisible: false,
   providerModal: {
     open: false,
     mode: "create" as "create" | "edit",
@@ -424,6 +430,8 @@ async function bootstrap(): Promise<void> {
   bindEvents();
   initCustomSelects();
   setSettingsPopoverOpen(false);
+  setSearchModalOpen(false);
+  setActiveSettingsSection(activeSettingsSection);
   setWorkspaceEditorModalOpen(false);
   setWorkspaceImportModalOpen(false);
   setCronCreateModalOpen(false);
@@ -502,9 +510,40 @@ function bindEvents(): void {
     });
   });
 
+  chatSearchToggleButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const nextOpen = !isSearchModalOpen();
+    setSearchModalOpen(nextOpen);
+    if (nextOpen) {
+      renderSearchChatResults();
+      searchChatInput.focus();
+      searchChatInput.select();
+    }
+  });
+  searchModal.addEventListener("click", (event) => {
+    const target = event.target;
+    if (target instanceof Element && target.closest("[data-search-close=\"true\"]")) {
+      setSearchModalOpen(false);
+      return;
+    }
+    event.stopPropagation();
+  });
+  searchModalCloseButton.addEventListener("click", () => {
+    setSearchModalOpen(false);
+  });
+
   settingsToggleButton.addEventListener("click", (event) => {
     event.stopPropagation();
     setSettingsPopoverOpen(!isSettingsPopoverOpen());
+  });
+  settingsSectionButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const section = button.dataset.settingsSection;
+      if (!isSettingsSectionKey(section)) {
+        return;
+      }
+      setActiveSettingsSection(section);
+    });
   });
   settingsPopover.addEventListener("click", (event) => {
     const target = event.target;
@@ -535,6 +574,12 @@ function bindEvents(): void {
       return;
     }
     setSettingsPopoverOpen(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !isSearchModalOpen()) {
+      return;
+    }
+    setSearchModalOpen(false);
   });
 
   reloadChatsButton.addEventListener("click", async () => {
@@ -600,15 +645,6 @@ function bindEvents(): void {
   refreshModelsButton.addEventListener("click", async () => {
     await refreshModels();
   });
-  modelsActiveForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await setActiveModel();
-  });
-  modelsActiveProviderSelect.addEventListener("change", () => {
-    const providerID = modelsActiveProviderSelect.value.trim();
-    renderActiveModelOptions(providerID);
-    modelsActiveModelManualInput.value = "";
-  });
   modelsAddProviderButton.addEventListener("click", () => {
     openProviderModal("create");
   });
@@ -620,17 +656,39 @@ function bindEvents(): void {
     appendProviderKVRow(modelsProviderHeadersRows, "headers");
   });
   modelsProviderAliasesAddButton.addEventListener("click", () => {
+    setProviderModelsManageMode(true);
     appendProviderKVRow(modelsProviderAliasesRows, "aliases");
+  });
+  modelsProviderModelsManageButton.addEventListener("click", () => {
+    setProviderModelsManageMode(!state.providerModelsManageOpen);
   });
   modelsProviderTypeSelect.addEventListener("change", () => {
     syncProviderCustomModelsField(modelsProviderTypeSelect.value);
   });
+  modelsProviderTestButton.addEventListener("click", () => {
+    setStatus(t("status.providerTestNotImplemented"), "info");
+  });
+  modelsProviderBaseURLInput.addEventListener("input", () => {
+    renderProviderBaseURLPreview();
+  });
   modelsProviderCustomModelsAddButton.addEventListener("click", () => {
+    setProviderModelsManageMode(true);
     appendCustomModelRow(modelsProviderCustomModelsRows);
   });
   modelsProviderForm.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) {
+      return;
+    }
+    const formActionButton = target.closest<HTMLButtonElement>("button[data-provider-form-action]");
+    if (formActionButton) {
+      const action = formActionButton.dataset.providerFormAction ?? "";
+      if (action === "toggle-api-key-visibility") {
+        setProviderAPIKeyVisibility(!state.providerAPIKeyVisible);
+      }
+      if (action === "focus-base-url") {
+        modelsProviderBaseURLInput.focus();
+      }
       return;
     }
     const kvRemoveButton = target.closest<HTMLButtonElement>("button[data-kv-remove]");
@@ -661,20 +719,8 @@ function bindEvents(): void {
       }
     }
   });
-  modelsProviderModalCloseButton.addEventListener("click", () => {
-    closeProviderModal();
-  });
   modelsProviderCancelButton.addEventListener("click", () => {
     closeProviderModal();
-  });
-  modelsProviderModal.addEventListener("click", (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) {
-      return;
-    }
-    if (target.closest("[data-modal-close=\"true\"]")) {
-      closeProviderModal();
-    }
   });
   modelsProviderList.addEventListener("click", async (event) => {
     const target = event.target;
@@ -690,6 +736,11 @@ function bindEvents(): void {
       return;
     }
     const action = button.dataset.providerAction;
+    if (action === "select") {
+      state.selectedProviderID = providerID;
+      openProviderModal("edit", providerID);
+      return;
+    }
     if (action === "edit") {
       openProviderModal("edit", providerID);
       return;
@@ -1105,11 +1156,61 @@ function isSettingsPopoverOpen(): boolean {
   return !settingsPopover.classList.contains("is-hidden");
 }
 
+function isSearchModalOpen(): boolean {
+  return !searchModal.classList.contains("is-hidden");
+}
+
+function setSearchModalOpen(open: boolean): void {
+  searchModal.classList.toggle("is-hidden", !open);
+  searchModal.setAttribute("aria-hidden", String(!open));
+  chatSearchToggleButton.setAttribute("aria-expanded", String(open));
+  document.body.classList.toggle("search-modal-open", open);
+}
+
+function isSettingsSectionKey(value: string | undefined): value is SettingsSectionKey {
+  return value === "connection" || value === "identity" || value === "display" || value === "models" || value === "channels" || value === "workspace";
+}
+
+function setActiveSettingsSection(section: SettingsSectionKey): void {
+  activeSettingsSection = section;
+  settingsSectionButtons.forEach((button) => {
+    const current = button.dataset.settingsSection;
+    const active = current === section;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  settingsSectionPanels.forEach((panel) => {
+    const current = panel.dataset.settingsSectionPanel;
+    const active = current === section;
+    panel.classList.toggle("is-active", active);
+    panel.hidden = !active;
+  });
+  if (section === "models") {
+    setModelsSettingsLevel("list");
+    if (!state.tabLoaded.models) {
+      void refreshModels();
+      return;
+    }
+    renderModelsPanel();
+    return;
+  }
+  if (section === "channels" && !state.tabLoaded.channels) {
+    void refreshQQChannelConfig();
+    return;
+  }
+  if (section === "workspace" && !state.tabLoaded.workspace) {
+    void refreshWorkspace();
+  }
+}
+
 function setSettingsPopoverOpen(open: boolean): void {
   settingsPopover.classList.toggle("is-hidden", !open);
   settingsPopover.setAttribute("aria-hidden", String(!open));
   settingsToggleButton.setAttribute("aria-expanded", String(open));
   document.body.classList.toggle("settings-open", open);
+  if (open) {
+    setActiveSettingsSection(activeSettingsSection);
+  }
 }
 
 function isWorkspaceEditorModalOpen(): boolean {
@@ -1243,10 +1344,9 @@ async function switchTab(tab: TabKey): Promise<void> {
   if (state.activeTab === tab) {
     return;
   }
-  if (tab !== "workspace") {
-    setWorkspaceEditorModalOpen(false);
-    setWorkspaceImportModalOpen(false);
-  }
+  setSearchModalOpen(false);
+  setWorkspaceEditorModalOpen(false);
+  setWorkspaceImportModalOpen(false);
   if (tab !== "cron") {
     setCronCreateModalOpen(false);
   }
@@ -1268,7 +1368,7 @@ function renderTabPanels(): void {
 
 async function loadTabData(tab: TabKey, force = false): Promise<void> {
   try {
-    if (tab === "chat" || tab === "search") {
+    if (tab === "chat") {
       await reloadChats();
       return;
     }
@@ -1277,15 +1377,6 @@ async function loadTabData(tab: TabKey, force = false): Promise<void> {
     }
 
     switch (tab) {
-      case "models":
-        await refreshModels();
-        break;
-      case "channels":
-        await refreshQQChannelConfig();
-        break;
-      case "workspace":
-        await refreshWorkspace();
-        break;
       case "cron":
         await refreshCronJobs();
         break;
@@ -1728,8 +1819,8 @@ function renderChatList(): void {
   chatList.innerHTML = "";
   if (state.chats.length === 0) {
     const li = document.createElement("li");
-    li.className = "message-empty";
-    li.textContent = t("chat.emptyByFilter");
+    li.className = "chat-empty-fill";
+    li.setAttribute("aria-hidden", "true");
     chatList.appendChild(li);
     return;
   }
@@ -1772,7 +1863,7 @@ function renderChatList(): void {
     deleteButton.className = "chat-delete-btn";
     deleteButton.setAttribute("aria-label", deleteLabel);
     deleteButton.title = deleteLabel;
-    deleteButton.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M7 21q-.825 0-1.412-.587T5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413T17 21zM17 6H7v13h10zM9 17h2V8H9zm4 0h2V8h-2zM7 6v13z"/></svg>`;
+    deleteButton.innerHTML = TRASH_ICON_SVG;
     deleteButton.addEventListener("click", async (event) => {
       event.stopPropagation();
       await deleteChat(chat.id);
@@ -1816,7 +1907,7 @@ function renderSearchChatResults(): void {
     }
     button.addEventListener("click", async () => {
       await openChat(chat.id);
-      await switchTab("chat");
+      setSearchModalOpen(false);
     });
 
     const title = document.createElement("span");
@@ -1871,8 +1962,8 @@ function renderMessages(): void {
   messageList.innerHTML = "";
   if (state.messages.length === 0) {
     const empty = document.createElement("li");
-    empty.className = "message-empty";
-    empty.textContent = t("chat.emptyMessages");
+    empty.className = "message-empty-fill";
+    empty.setAttribute("aria-hidden", "true");
     messageList.appendChild(empty);
     return;
   }
@@ -2308,194 +2399,118 @@ async function loadModelCatalog(): Promise<{
 }
 
 function renderModelsPanel(): void {
-  renderActiveModelEditor();
+  syncSelectedProviderID();
+  renderProviderNavigation();
+  renderModelsSettingsLevel();
+  renderProviderBaseURLPreview();
+  setProviderModelsManageMode(state.providerModelsManageOpen);
+  setProviderAPIKeyVisibility(state.providerAPIKeyVisible);
+}
+
+function setProviderModelsManageMode(open: boolean): void {
+  state.providerModelsManageOpen = open;
+  modelsProviderModelsBody.hidden = !open;
+  modelsProviderModelsManageButton.classList.toggle("is-active", open);
+  modelsProviderModelsManageButton.setAttribute("aria-pressed", String(open));
+}
+
+function setProviderAPIKeyVisibility(visible: boolean): void {
+  state.providerAPIKeyVisible = visible;
+  modelsProviderAPIKeyInput.type = visible ? "text" : "password";
+  modelsProviderAPIKeyVisibilityButton.classList.toggle("is-active", visible);
+  modelsProviderAPIKeyVisibilityButton.setAttribute("aria-pressed", String(visible));
+}
+
+function renderProviderBaseURLPreview(): void {
+  const base = modelsProviderBaseURLInput.value.trim().replace(/\/+$/g, "");
+  modelsProviderBaseURLPreview.textContent = base === "" ? "/responses" : `${base}/responses`;
+}
+
+function setModelsSettingsLevel(level: ModelsSettingsLevel): void {
+  const canShowEdit =
+    level === "edit" &&
+    (state.providerModal.open ||
+      (state.providers.some((provider) => provider.id === state.selectedProviderID) && state.selectedProviderID !== ""));
+  state.modelsSettingsLevel = canShowEdit ? "edit" : "list";
+  const showEdit = state.modelsSettingsLevel === "edit";
+  modelsLevel1View.hidden = showEdit;
+  modelsLevel2View.hidden = !showEdit;
+  modelsSettingsSection.classList.toggle("is-level2-active", showEdit);
+}
+
+function renderModelsSettingsLevel(): void {
+  if (state.providerModal.open && state.providerModal.mode === "create") {
+    modelsEditProviderMeta.textContent = t("models.addProvider");
+  } else {
+    const selected = state.providers.find((provider) => provider.id === state.selectedProviderID);
+    modelsEditProviderMeta.textContent = selected ? formatProviderLabel(selected) : "";
+  }
+  setModelsSettingsLevel(state.modelsSettingsLevel);
+}
+
+function syncSelectedProviderID(): void {
+  if (state.providers.length === 0) {
+    state.selectedProviderID = "";
+    return;
+  }
+  if (state.providers.some((provider) => provider.id === state.selectedProviderID)) {
+    return;
+  }
+  if (state.activeLLM.provider_id !== "" && state.providers.some((provider) => provider.id === state.activeLLM.provider_id)) {
+    state.selectedProviderID = state.activeLLM.provider_id;
+    return;
+  }
+  state.selectedProviderID = state.providers[0].id;
+}
+
+function renderProviderNavigation(): void {
   modelsProviderList.innerHTML = "";
   if (state.providers.length === 0) {
     appendEmptyItem(modelsProviderList, t("models.emptyProviders"));
-  } else {
-    for (const provider of state.providers) {
-      const item = document.createElement("li");
-      item.className = "detail-item";
-
-      const title = document.createElement("p");
-      title.className = "item-title";
-      title.textContent = formatProviderLabel(provider);
-
-      const enabledLine = document.createElement("p");
-      enabledLine.className = "item-meta";
-      enabledLine.textContent = t("models.enabledLine", {
-        enabled: provider.enabled === false ? t("common.no") : t("common.yes"),
-      });
-
-      const keyStatus = document.createElement("p");
-      keyStatus.className = "item-meta";
-      keyStatus.textContent = provider.has_api_key
-        ? t("models.apiKeyConfigured", {
-            value: provider.current_api_key ?? t("models.apiKeyMasked"),
-          })
-        : t("models.apiKeyUnset");
-
-      const defaultLine = document.createElement("p");
-      defaultLine.className = "item-meta";
-      defaultLine.textContent = t("models.defaultLine", {
-        model: state.modelDefaults[provider.id] || t("common.none"),
-      });
-
-      const baseURLLine = document.createElement("p");
-      baseURLLine.className = "item-meta";
-      baseURLLine.textContent = t("models.baseURLLine", {
-        baseURL: provider.current_base_url || t("common.none"),
-      });
-
-      const modelText = provider.models.map((model) => formatModelEntry(model)).join(", ") || t("models.noModels");
-      const modelLine = document.createElement("p");
-      modelLine.className = "item-meta";
-      modelLine.textContent = t("models.modelLine", { models: modelText });
-
-      const actions = document.createElement("div");
-      actions.className = "actions-row";
-
-      const editButton = document.createElement("button");
-      editButton.type = "button";
-      editButton.className = "secondary-btn";
-      editButton.dataset.providerAction = "edit";
-      editButton.dataset.providerId = provider.id;
-      editButton.textContent = t("models.editProvider");
-
-      const deleteButton = document.createElement("button");
-      deleteButton.type = "button";
-      deleteButton.className = "danger-btn";
-      deleteButton.dataset.providerAction = "delete";
-      deleteButton.dataset.providerId = provider.id;
-      deleteButton.textContent = t("models.deleteProvider");
-
-      actions.append(editButton, deleteButton);
-      item.append(title, enabledLine, keyStatus, defaultLine, baseURLLine, modelLine, actions);
-      modelsProviderList.appendChild(item);
-    }
-  }
-}
-
-function renderActiveModelEditor(): void {
-  renderActiveProviderOptions();
-  if (state.providers.length === 0) {
-    modelsActiveModelSelect.innerHTML = "";
-    modelsActiveModelManualInput.value = "";
-    modelsActiveProviderSelect.disabled = true;
-    modelsActiveModelSelect.disabled = true;
-    modelsActiveModelManualInput.disabled = true;
-    modelsSetActiveButton.disabled = true;
-    modelsActiveSummary.textContent = t("models.activeSummary", {
-      providerId: t("common.none"),
-      model: t("common.none"),
-    });
-    syncAllCustomSelects();
-    return;
-  }
-
-  const hasActiveProvider = state.providers.some((provider) => provider.id === state.activeLLM.provider_id);
-  const selectedProviderID = hasActiveProvider ? state.activeLLM.provider_id : state.providers[0].id;
-  modelsActiveProviderSelect.value = selectedProviderID;
-  renderActiveModelOptions(selectedProviderID, state.activeLLM.model);
-
-  const selectedProvider = state.providers.find((provider) => provider.id === selectedProviderID);
-  const hasActiveModelInList =
-    selectedProvider?.models.some((model) => model.id === state.activeLLM.model) ?? false;
-  modelsActiveModelManualInput.value = hasActiveModelInList ? "" : state.activeLLM.model;
-
-  modelsActiveProviderSelect.disabled = false;
-  modelsActiveModelManualInput.disabled = false;
-  modelsSetActiveButton.disabled = false;
-  modelsActiveSummary.textContent = t("models.activeSummary", {
-    providerId: state.activeLLM.provider_id || t("common.none"),
-    model: state.activeLLM.model || t("common.none"),
-  });
-  syncAllCustomSelects();
-}
-
-function renderActiveProviderOptions(): void {
-  modelsActiveProviderSelect.innerHTML = "";
-  if (state.providers.length === 0) {
-    const emptyOption = document.createElement("option");
-    emptyOption.value = "";
-    emptyOption.textContent = t("models.noProviderOption");
-    modelsActiveProviderSelect.appendChild(emptyOption);
-    syncCustomSelect(modelsActiveProviderSelect);
     return;
   }
 
   for (const provider of state.providers) {
-    const option = document.createElement("option");
-    option.value = provider.id;
-    option.textContent = formatProviderLabel(provider);
-    modelsActiveProviderSelect.appendChild(option);
-  }
-  syncCustomSelect(modelsActiveProviderSelect);
-}
+    const entry = document.createElement("li");
+    entry.className = "models-provider-card-entry";
 
-function renderActiveModelOptions(providerID: string, preferredModel = ""): void {
-  modelsActiveModelSelect.innerHTML = "";
-  const provider = state.providers.find((item) => item.id === providerID);
-  const models = provider?.models ?? [];
-  if (models.length === 0) {
-    const emptyOption = document.createElement("option");
-    emptyOption.value = "";
-    emptyOption.textContent = t("models.noModelOption");
-    modelsActiveModelSelect.appendChild(emptyOption);
-    modelsActiveModelSelect.disabled = true;
-    syncCustomSelect(modelsActiveModelSelect);
-    return;
-  }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "models-provider-card";
+    if (provider.id === state.selectedProviderID) {
+      button.classList.add("is-selected");
+    }
+    button.dataset.providerAction = "select";
+    button.dataset.providerId = provider.id;
+    button.setAttribute("aria-pressed", String(provider.id === state.selectedProviderID));
 
-  for (const model of models) {
-    const option = document.createElement("option");
-    option.value = model.id;
-    option.textContent = formatModelEntry(model);
-    modelsActiveModelSelect.appendChild(option);
-  }
+    const title = document.createElement("span");
+    title.className = "models-provider-card-title";
+    title.textContent = formatProviderLabel(provider);
 
-  const preferred = preferredModel.trim();
-  const hasPreferred = preferred !== "" && models.some((model) => model.id === preferred);
-  const fallback = state.modelDefaults[providerID];
-  const hasFallback = typeof fallback === "string" && fallback !== "" && models.some((model) => model.id === fallback);
-  const selected = hasPreferred ? preferred : hasFallback ? fallback : models[0].id;
-  modelsActiveModelSelect.value = selected;
-  modelsActiveModelSelect.disabled = false;
-  syncCustomSelect(modelsActiveModelSelect);
-}
-
-async function setActiveModel(): Promise<void> {
-  syncControlState();
-  const providerID = modelsActiveProviderSelect.value.trim();
-  const modelFromProvider = modelsActiveModelSelect.value.trim();
-  const manualModel = modelsActiveModelManualInput.value.trim();
-  const modelID = manualModel || modelFromProvider;
-
-  if (providerID === "" || modelID === "") {
-    setStatus(t("error.providerAndModelRequired"), "error");
-    return;
-  }
-
-  try {
-    const out = await requestJSON<ActiveModelsInfo>("/models/active", {
-      method: "PUT",
-      body: {
-        provider_id: providerID,
-        model: modelID,
-      },
+    const enabledMeta = document.createElement("span");
+    enabledMeta.className = "models-provider-card-meta";
+    enabledMeta.textContent = t("models.enabledLine", {
+      enabled: provider.enabled === false ? t("common.no") : t("common.yes"),
     });
-    const active = normalizeModelSlot(out.active_llm);
-    state.activeLLM = active;
-    renderActiveModelEditor();
-    setStatus(
-      t("status.activeModelUpdated", {
-        providerId: active.provider_id || providerID,
-        model: active.model || modelID,
-      }),
-      "info",
-    );
-  } catch (error) {
-    setStatus(asErrorMessage(error), "error");
+
+    const keyMeta = document.createElement("span");
+    keyMeta.className = "models-provider-card-meta";
+    keyMeta.textContent = provider.has_api_key ? t("models.apiKeyConfigured", { value: t("models.apiKeyMasked") }) : t("models.apiKeyUnset");
+
+    const deleteButton = document.createElement("button");
+    const deleteLabel = t("models.deleteProvider");
+    deleteButton.type = "button";
+    deleteButton.className = "models-provider-card-delete chat-delete-btn";
+    deleteButton.dataset.providerAction = "delete";
+    deleteButton.dataset.providerId = provider.id;
+    deleteButton.setAttribute("aria-label", deleteLabel);
+    deleteButton.title = deleteLabel;
+    deleteButton.innerHTML = TRASH_ICON_SVG;
+
+    button.append(title, enabledMeta, keyMeta);
+    entry.append(button, deleteButton);
+    modelsProviderList.appendChild(entry);
   }
 }
 
@@ -2688,6 +2703,9 @@ function resetProviderModalForm(): void {
   resetProviderKVEditor(modelsProviderAliasesRows, "aliases");
   resetProviderCustomModelsEditor();
   syncProviderCustomModelsField("openai");
+  setProviderModelsManageMode(false);
+  setProviderAPIKeyVisibility(false);
+  renderProviderBaseURLPreview();
 }
 
 function openProviderModal(mode: "create" | "edit", providerID = ""): void {
@@ -2698,19 +2716,27 @@ function openProviderModal(mode: "create" | "edit", providerID = ""): void {
   if (mode === "create") {
     resetProviderModalForm();
     modelsProviderModalTitle.textContent = t("models.addProviderTitle");
-    modelsProviderTypeSelect.focus();
   } else {
+    state.selectedProviderID = providerID;
     modelsProviderModalTitle.textContent = t("models.editProviderTitle");
     populateProviderForm(providerID);
+  }
+  setModelsSettingsLevel("edit");
+  renderModelsSettingsLevel();
+  if (mode === "create") {
+    modelsProviderTypeSelect.focus();
+  } else {
     modelsProviderNameInput.focus();
   }
-  modelsProviderModal.classList.remove("is-hidden");
 }
 
 function closeProviderModal(): void {
   state.providerModal.open = false;
   state.providerModal.editingProviderID = "";
-  modelsProviderModal.classList.add("is-hidden");
+  setProviderModelsManageMode(false);
+  setProviderAPIKeyVisibility(false);
+  setModelsSettingsLevel("list");
+  renderModelsSettingsLevel();
 }
 
 function populateProviderForm(providerID: string): void {
@@ -2730,6 +2756,9 @@ function populateProviderForm(providerID: string): void {
   populateProviderAliasRows(provider.models);
   populateProviderCustomModelsRows(provider);
   syncProviderCustomModelsField(resolveProviderType(provider));
+  setProviderModelsManageMode(false);
+  setProviderAPIKeyVisibility(false);
+  renderProviderBaseURLPreview();
   setStatus(t("status.providerLoadedForEdit", { providerId: provider.id }), "info");
 }
 
@@ -2827,6 +2856,8 @@ async function upsertProvider(): Promise<void> {
       method: "PUT",
       body: payload,
     });
+    state.selectedProviderID = out.id ?? providerID;
+    setModelsSettingsLevel("list");
     await refreshModels();
     closeProviderModal();
     modelsProviderAPIKeyInput.value = "";
@@ -4192,14 +4223,7 @@ function compactTime(value: string): string {
 }
 
 function isTabKey(value: string | undefined): value is TabKey {
-  return (
-    value === "chat" ||
-    value === "search" ||
-    value === "models" ||
-    value === "channels" ||
-    value === "workspace" ||
-    value === "cron"
-  );
+  return value === "chat" || value === "cron";
 }
 
 function newSessionID(): string {

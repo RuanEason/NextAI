@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -24,7 +24,7 @@ async function waitFor(condition: () => boolean, timeoutMS = 2000): Promise<void
   }
 }
 
-describe("web e2e: set active model then send chat", () => {
+describe("web e2e: auto activate model then send chat", () => {
   let originalFetch: typeof globalThis.fetch;
 
   beforeEach(() => {
@@ -43,9 +43,9 @@ describe("web e2e: set active model then send chat", () => {
     document.documentElement.innerHTML = "<head></head><body></body>";
   });
 
-  it("在 Web 中设置 active model 后发送消息，回复不走 Echo 兜底", async () => {
+  it("auto activates model and sends chat without Echo fallback", async () => {
     const replies = {
-      model: "这是模型回复，不是 Echo",
+      model: "杩欐槸妯″瀷鍥炲锛屼笉鏄?Echo",
     };
     const providerID = "openai-compatible";
     const modelID = "ark-code-latest";
@@ -68,7 +68,7 @@ describe("web e2e: set active model then send chat", () => {
         return jsonResponse([
           {
             id: "chat-e2e-1",
-            name: "你好",
+            name: "浣犲ソ",
             session_id: processRequestSessionID,
             user_id: processRequestUserID,
             channel: processRequestChannel,
@@ -156,7 +156,7 @@ describe("web e2e: set active model then send chat", () => {
               id: "msg-user",
               role: "user",
               type: "message",
-              content: [{ type: "text", text: "你好" }],
+              content: [{ type: "text", text: "浣犲ソ" }],
             },
             {
               id: "msg-assistant",
@@ -172,20 +172,40 @@ describe("web e2e: set active model then send chat", () => {
     }) as typeof globalThis.fetch;
 
     await import("../../src/main.ts");
+    await waitFor(() => activeSetCalled);
 
-    const modelsTabButton = document.querySelector<HTMLButtonElement>('button[data-tab="models"]');
-    expect(modelsTabButton).not.toBeNull();
-    modelsTabButton?.click();
+    const settingsToggleButton = document.getElementById("settings-toggle") as HTMLButtonElement;
+    settingsToggleButton.click();
+    const modelsSectionButton = document.querySelector<HTMLButtonElement>('button[data-settings-section="models"]');
+    expect(modelsSectionButton).not.toBeNull();
+    modelsSectionButton?.click();
+
+    await waitFor(() =>
+      Boolean(
+        document.querySelector<HTMLButtonElement>(
+          `button[data-provider-action="select"][data-provider-id="${providerID}"]`,
+        ),
+      ),
+    );
+
+    const providerDeleteButton = document.querySelector<HTMLButtonElement>(
+      `button[data-provider-action="delete"][data-provider-id="${providerID}"]`,
+    );
+    expect(providerDeleteButton).not.toBeNull();
+    expect(providerDeleteButton?.classList.contains("chat-delete-btn")).toBe(true);
+    expect(providerDeleteButton?.querySelector("svg")).not.toBeNull();
+    expect(providerDeleteButton?.getAttribute("aria-label")).toBe("删除提供商");
+
+    const providerCardButton = document.querySelector<HTMLButtonElement>(
+      `button[data-provider-action="select"][data-provider-id="${providerID}"]`,
+    );
+    expect(providerCardButton).not.toBeNull();
+    providerCardButton?.click();
 
     await waitFor(() => {
-      const select = document.getElementById("models-active-provider-select") as HTMLSelectElement | null;
-      return Boolean(select && select.options.length > 0 && select.value === providerID);
+      const level2 = document.getElementById("models-level2-view");
+      return Boolean(level2 && !level2.hasAttribute("hidden"));
     });
-
-    const modelsActiveForm = document.getElementById("models-active-form") as HTMLFormElement;
-    modelsActiveForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-
-    await waitFor(() => activeSetCalled);
 
     const chatTabButton = document.querySelector<HTMLButtonElement>('button[data-tab="chat"]');
     expect(chatTabButton).not.toBeNull();
@@ -193,7 +213,7 @@ describe("web e2e: set active model then send chat", () => {
 
     const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
     const composerForm = document.getElementById("composer") as HTMLFormElement;
-    messageInput.value = "你好";
+    messageInput.value = "浣犲ソ";
     composerForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
 
     await waitFor(() => {
@@ -206,17 +226,18 @@ describe("web e2e: set active model then send chat", () => {
     const text = assistantMessages[assistantMessages.length - 1]?.textContent ?? "";
     expect(text).toContain(replies.model);
     expect(text).not.toContain("Echo:");
+    expect(activeSetCalled).toBe(true);
     expect(processCalled).toBe(true);
   });
 
-  it("添加 openai-compatible 提供商时不会覆盖同类型已有配置", async () => {
+  it("adding openai-compatible provider does not overwrite existing same-type config", async () => {
     const existingProviderID = "openai-compatible";
     const modelID = "ark-code-latest";
     const catalogProviders = [
       {
         id: existingProviderID,
         name: "OPENAI-COMPATIBLE",
-        display_name: "已有 Provider",
+        display_name: "宸叉湁 Provider",
         openai_compatible: true,
         api_key_prefix: "OPENAI_COMPATIBLE_API_KEY",
         models: [{ id: modelID, name: modelID }],
@@ -284,14 +305,16 @@ describe("web e2e: set active model then send chat", () => {
 
     await import("../../src/main.ts");
 
-    const modelsTabButton = document.querySelector<HTMLButtonElement>('button[data-tab="models"]');
-    expect(modelsTabButton).not.toBeNull();
-    modelsTabButton?.click();
+    const settingsToggleButton = document.getElementById("settings-toggle") as HTMLButtonElement;
+    settingsToggleButton.click();
+    const modelsSectionButton = document.querySelector<HTMLButtonElement>('button[data-settings-section="models"]');
+    expect(modelsSectionButton).not.toBeNull();
+    modelsSectionButton?.click();
 
     await waitFor(() =>
       Boolean(
         document.querySelector<HTMLButtonElement>(
-          `button[data-provider-action="edit"][data-provider-id="${existingProviderID}"]`,
+          `button[data-provider-action="select"][data-provider-id="${existingProviderID}"]`,
         ),
       ),
     );
@@ -300,16 +323,13 @@ describe("web e2e: set active model then send chat", () => {
     addProviderButton.click();
 
     await waitFor(() => {
-      const modal = document.getElementById("models-provider-modal");
-      return Boolean(modal && !modal.classList.contains("is-hidden"));
+      const level2 = document.getElementById("models-level2-view");
+      return Boolean(level2 && !level2.hasAttribute("hidden"));
     });
 
     const providerTypeSelect = document.getElementById("models-provider-type-select") as HTMLSelectElement;
     providerTypeSelect.value = "openai-compatible";
     providerTypeSelect.dispatchEvent(new Event("change", { bubbles: true }));
-
-    const providerNameInput = document.getElementById("models-provider-name-input") as HTMLInputElement;
-    providerNameInput.value = "";
 
     const providerForm = document.getElementById("models-provider-form") as HTMLFormElement;
     providerForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
