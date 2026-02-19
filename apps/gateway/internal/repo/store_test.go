@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"nextai/apps/gateway/internal/domain"
 )
 
 func TestLoadKeepsCustomProviderAndActiveProvider(t *testing.T) {
@@ -119,6 +121,49 @@ func TestLoadDropsLegacyDemoProvider(t *testing.T) {
 		}
 		if st.ActiveLLM.ProviderID != "" || st.ActiveLLM.Model != "" {
 			t.Fatalf("expected active_llm to be cleared when demo is removed, got=%+v", st.ActiveLLM)
+		}
+	})
+}
+
+func TestLoadEnsuresDefaultChat(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	raw := `{
+  "chats": {},
+  "histories": {},
+  "providers": {
+    "openai": {"enabled": true}
+  }
+}`
+	if err := os.WriteFile(statePath, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("new store failed: %v", err)
+	}
+
+	store.Read(func(st *State) {
+		chat, ok := st.Chats[domain.DefaultChatID]
+		if !ok {
+			t.Fatalf("default chat should exist")
+		}
+		if chat.SessionID != domain.DefaultChatSessionID {
+			t.Fatalf("default chat session mismatch: %q", chat.SessionID)
+		}
+		if chat.UserID != domain.DefaultChatUserID {
+			t.Fatalf("default chat user mismatch: %q", chat.UserID)
+		}
+		if chat.Channel != domain.DefaultChatChannel {
+			t.Fatalf("default chat channel mismatch: %q", chat.Channel)
+		}
+		flag, ok := chat.Meta[domain.ChatMetaSystemDefault].(bool)
+		if !ok || !flag {
+			t.Fatalf("default chat meta.system_default should be true, meta=%#v", chat.Meta)
+		}
+		if _, ok := st.Histories[domain.DefaultChatID]; !ok {
+			t.Fatalf("default chat history should exist")
 		}
 	})
 }

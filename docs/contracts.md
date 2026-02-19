@@ -101,3 +101,9 @@
 - `assistant_delta`
 - `completed`
 - `error`（仅流式失败场景）
+
+## Chat Default Session Rule
+- Gateway always keeps one protected default chat in state (`id=chat-default`).
+- Default chat baseline fields: `session_id=session-default`, `user_id=demo-user`, `channel=console`.
+- Default chat carries `meta.system_default=true`.
+- `DELETE /chats/{chat_id}` and `POST /chats/batch-delete` reject deleting `chat-default` with `400 default_chat_protected`.

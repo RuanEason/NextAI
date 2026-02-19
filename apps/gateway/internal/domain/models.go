@@ -1,5 +1,14 @@
 package domain
 
+const (
+	DefaultChatID         = "chat-default"
+	DefaultChatName       = "Default Chat"
+	DefaultChatSessionID  = "session-default"
+	DefaultChatUserID     = "demo-user"
+	DefaultChatChannel    = "console"
+	ChatMetaSystemDefault = "system_default"
+)
+
 type APIErrorBody struct {
 	Error APIError `json:"error"`
 }

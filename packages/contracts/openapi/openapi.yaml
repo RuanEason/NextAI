@@ -21,6 +21,7 @@ paths:
           description: health
   /chats:
     get:
+      description: List chats. Gateway always keeps a protected default chat in storage.
       parameters:
         - in: query
           name: user_id
@@ -40,6 +41,7 @@ paths:
         '200': { description: ok }
   /chats/batch-delete:
     post:
+      description: Batch delete chats. The protected default chat (`chat-default`) cannot be deleted.
       requestBody:
         required: true
         content:
@@ -49,6 +51,7 @@ paths:
               items: { type: string }
       responses:
         '200': { description: ok }
+        '400': { description: default chat cannot be deleted }
   /chats/{chat_id}:
     parameters:
       - in: path
@@ -69,6 +72,7 @@ paths:
     delete:
       responses:
         '200': { description: ok }
+        '400': { description: default chat cannot be deleted }
   /agent/process:
     post:
       requestBody:

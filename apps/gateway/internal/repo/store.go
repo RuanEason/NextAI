@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"nextai/apps/gateway/internal/domain"
 )
@@ -54,7 +55,7 @@ func NewStore(dataDir string) (*Store, error) {
 }
 
 func defaultState(dataDir string) State {
-	return State{
+	state := State{
 		Chats:      map[string]domain.ChatSpec{},
 		Histories:  map[string][]domain.RuntimeMessage{},
 		CronJobs:   map[string]domain.CronJobSpec{},
@@ -90,6 +91,8 @@ func defaultState(dataDir string) State {
 			},
 		},
 	}
+	ensureDefaultChat(&state)
+	return state
 }
 
 func (s *Store) load() error {
@@ -184,6 +187,7 @@ func (s *Store) load() error {
 			"timeout_seconds": 8,
 		}
 	}
+	ensureDefaultChat(&state)
 	s.state = state
 	return nil
 }
@@ -195,11 +199,59 @@ func (s *Store) Save() error {
 }
 
 func (s *Store) saveLocked() error {
+	ensureDefaultChat(&s.state)
 	b, err := json.MarshalIndent(s.state, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(s.stateFile, b, 0o644)
+}
+
+func ensureDefaultChat(state *State) {
+	if state == nil {
+		return
+	}
+	if state.Chats == nil {
+		state.Chats = map[string]domain.ChatSpec{}
+	}
+	if state.Histories == nil {
+		state.Histories = map[string][]domain.RuntimeMessage{}
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	defaultMeta := map[string]interface{}{
+		domain.ChatMetaSystemDefault: true,
+	}
+	defaultChat := domain.ChatSpec{
+		ID:        domain.DefaultChatID,
+		Name:      domain.DefaultChatName,
+		SessionID: domain.DefaultChatSessionID,
+		UserID:    domain.DefaultChatUserID,
+		Channel:   domain.DefaultChatChannel,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Meta:      defaultMeta,
+	}
+
+	if current, ok := state.Chats[domain.DefaultChatID]; ok {
+		if strings.TrimSpace(current.CreatedAt) != "" {
+			defaultChat.CreatedAt = current.CreatedAt
+		}
+		if strings.TrimSpace(current.UpdatedAt) != "" {
+			defaultChat.UpdatedAt = current.UpdatedAt
+		}
+		if current.Meta != nil {
+			for key, value := range current.Meta {
+				defaultChat.Meta[key] = value
+			}
+		}
+		defaultChat.Meta[domain.ChatMetaSystemDefault] = true
+	}
+
+	state.Chats[domain.DefaultChatID] = defaultChat
+	if _, ok := state.Histories[domain.DefaultChatID]; !ok {
+		state.Histories[domain.DefaultChatID] = []domain.RuntimeMessage{}
+	}
 }
 
 func (s *Store) Read(fn func(state *State)) {

@@ -507,6 +507,12 @@ func (s *Server) batchDeleteChats(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 		return
 	}
+	for _, id := range ids {
+		if strings.TrimSpace(id) == domain.DefaultChatID {
+			writeErr(w, http.StatusBadRequest, "default_chat_protected", "default chat cannot be deleted", map[string]string{"chat_id": domain.DefaultChatID})
+			return
+		}
+	}
 	if err := s.store.Write(func(state *repo.State) error {
 		for _, id := range ids {
 			delete(state.Chats, id)
@@ -570,6 +576,10 @@ func (s *Server) updateChat(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteChat(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "chat_id")
+	if strings.TrimSpace(id) == domain.DefaultChatID {
+		writeErr(w, http.StatusBadRequest, "default_chat_protected", "default chat cannot be deleted", map[string]string{"chat_id": domain.DefaultChatID})
+		return
+	}
 	deleted := false
 	if err := s.store.Write(func(state *repo.State) error {
 		if _, ok := state.Chats[id]; ok {

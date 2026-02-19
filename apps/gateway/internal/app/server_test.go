@@ -353,6 +353,76 @@ func TestChatCreateAndGetHistory(t *testing.T) {
 	}
 }
 
+func TestListChatsContainsDefaultChat(t *testing.T) {
+	srv := newTestServer(t)
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/chats?user_id=demo-user&channel=console", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list chats status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var chats []domain.ChatSpec
+	if err := json.Unmarshal(w.Body.Bytes(), &chats); err != nil {
+		t.Fatalf("decode chats failed: %v body=%s", err, w.Body.String())
+	}
+
+	var defaultChat *domain.ChatSpec
+	for i := range chats {
+		if chats[i].ID == domain.DefaultChatID {
+			defaultChat = &chats[i]
+			break
+		}
+	}
+	if defaultChat == nil {
+		t.Fatalf("default chat should exist in list: %s", w.Body.String())
+	}
+	if defaultChat.SessionID != domain.DefaultChatSessionID {
+		t.Fatalf("unexpected default chat session_id: %q", defaultChat.SessionID)
+	}
+	if defaultChat.UserID != domain.DefaultChatUserID {
+		t.Fatalf("unexpected default chat user_id: %q", defaultChat.UserID)
+	}
+	if defaultChat.Channel != domain.DefaultChatChannel {
+		t.Fatalf("unexpected default chat channel: %q", defaultChat.Channel)
+	}
+	flag, ok := defaultChat.Meta[domain.ChatMetaSystemDefault].(bool)
+	if !ok || !flag {
+		t.Fatalf("default chat should have meta.system_default=true, meta=%#v", defaultChat.Meta)
+	}
+}
+
+func TestDeleteDefaultChatRejected(t *testing.T) {
+	srv := newTestServer(t)
+
+	deleteW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(deleteW, httptest.NewRequest(http.MethodDelete, "/chats/"+domain.DefaultChatID, nil))
+	if deleteW.Code != http.StatusBadRequest {
+		t.Fatalf("delete default chat status=%d body=%s", deleteW.Code, deleteW.Body.String())
+	}
+	if !strings.Contains(deleteW.Body.String(), `"code":"default_chat_protected"`) {
+		t.Fatalf("unexpected delete error body: %s", deleteW.Body.String())
+	}
+
+	batchDeleteW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(batchDeleteW, httptest.NewRequest(http.MethodPost, "/chats/batch-delete", strings.NewReader(`["`+domain.DefaultChatID+`"]`)))
+	if batchDeleteW.Code != http.StatusBadRequest {
+		t.Fatalf("batch delete default chat status=%d body=%s", batchDeleteW.Code, batchDeleteW.Body.String())
+	}
+	if !strings.Contains(batchDeleteW.Body.String(), `"code":"default_chat_protected"`) {
+		t.Fatalf("unexpected batch delete error body: %s", batchDeleteW.Body.String())
+	}
+
+	listW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(listW, httptest.NewRequest(http.MethodGet, "/chats?user_id=demo-user&channel=console", nil))
+	if listW.Code != http.StatusOK {
+		t.Fatalf("list chats status=%d body=%s", listW.Code, listW.Body.String())
+	}
+	if !strings.Contains(listW.Body.String(), `"id":"`+domain.DefaultChatID+`"`) {
+		t.Fatalf("default chat should still exist after delete attempts: %s", listW.Body.String())
+	}
+}
+
 func TestProcessAgentReusesChatHistoryContext(t *testing.T) {
 	srv := newTestServer(t)
 
