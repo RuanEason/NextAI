@@ -1,6 +1,6 @@
 ﻿# NextAI TODO
 
-更新时间：2026-02-21 12:08:22 +0800
+更新时间：2026-02-21 12:13:49 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`（Windows：`C:\Users\Lenovo\.codex\handoff\latest.md`）。
@@ -27,6 +27,7 @@
 - [ ] 阻塞：`cd apps/gateway && go test ./...` 当前失败 1 项：`TestProcessAgentViewOutOfBoundsFallsBackToEmptyFile` 断言仍使用旧文案 `[empty file fallback]`，实际输出已为 `[empty] (fallback from requested [1-100], total=0)`（2026-02-21 12:02 +0800 复验仍失败）。
 
 ## 4. 最近关键变更（摘要）
+- [x] 2026-02-21 12:13 +0800 fork 主干历史对齐完成：已备份旧主干 `backup/main-20260221`，并执行 `git push NextAI main:main --force-with-lease` 将 `NextAI/main` 对齐到 `ca6195e`；随后将 `https://github.com/RuanEason/NextAI/pull/1` 的 base 从 `base/nextai-main-sync` 切换为 `main`。
 - [x] 2026-02-21 12:08 +0800 fork PR 已创建：`https://github.com/RuanEason/NextAI/pull/1`（`head=feat/web-gateway-cron-default-guard`，`base=base/nextai-main-sync`）。说明：`NextAI/main` 与当前仓库历史不一致（无共同祖先），无法直接对 `main` 建 PR，故先推送同历史基线分支 `base/nextai-main-sync` 再发起 PR。
 - [x] 2026-02-21 12:05 +0800 工作区分批提交：新分支 `feat/web-gateway-cron-default-guard` 已提交两批代码，`cc9ab5a feat(gateway): protect default cron job lifecycle`、`37e63d5 feat(web): refine chat and cron workflow interactions`。
 - [x] 2026-02-21 12:05 +0800 本次验证：执行 `pnpm --filter @nextai/tests-contract run lint`、`pnpm --filter @nextai/tests-contract run test`、`pnpm -C apps/web test`（44 tests）、`pnpm -C apps/web build` 均通过；执行 `cd apps/gateway && go test ./...` 失败 1 项（既有阻塞 `TestProcessAgentViewOutOfBoundsFallsBackToEmptyFile`）；定向执行 `cd apps/gateway && go test ./internal/repo -run TestLoadEnsuresDefaultCronJob -count=1` 与 `cd apps/gateway && go test ./internal/app -run "TestListCronJobsContainsDefaultCronJob|TestDeleteDefaultCronJobRejected" -count=1` 通过。
