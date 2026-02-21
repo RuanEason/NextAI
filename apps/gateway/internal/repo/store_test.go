@@ -167,3 +167,58 @@ func TestLoadEnsuresDefaultChat(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadEnsuresDefaultCronJob(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	raw := `{
+  "cron_jobs": {},
+  "cron_states": {},
+  "providers": {
+    "openai": {"enabled": true}
+  }
+}`
+	if err := os.WriteFile(statePath, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("new store failed: %v", err)
+	}
+
+	store.Read(func(st *State) {
+		job, ok := st.CronJobs[domain.DefaultCronJobID]
+		if !ok {
+			t.Fatalf("default cron job should exist")
+		}
+		if job.Name != domain.DefaultCronJobName {
+			t.Fatalf("default cron job name mismatch: %q", job.Name)
+		}
+		if job.TaskType != "text" {
+			t.Fatalf("default cron job task_type mismatch: %q", job.TaskType)
+		}
+		if job.Text != domain.DefaultCronJobText {
+			t.Fatalf("default cron job text mismatch: %q", job.Text)
+		}
+		if job.Enabled {
+			t.Fatalf("default cron job should be disabled by default")
+		}
+		if job.Schedule.Type != "interval" || job.Schedule.Cron != domain.DefaultCronJobInterval {
+			t.Fatalf("default cron schedule mismatch: %+v", job.Schedule)
+		}
+		if job.Dispatch.Channel != domain.DefaultChatChannel {
+			t.Fatalf("default cron channel mismatch: %q", job.Dispatch.Channel)
+		}
+		if job.Dispatch.Target.UserID != domain.DefaultChatUserID {
+			t.Fatalf("default cron user_id mismatch: %q", job.Dispatch.Target.UserID)
+		}
+		if job.Dispatch.Target.SessionID != domain.DefaultChatSessionID {
+			t.Fatalf("default cron session_id mismatch: %q", job.Dispatch.Target.SessionID)
+		}
+		flag, ok := job.Meta[domain.CronMetaSystemDefault].(bool)
+		if !ok || !flag {
+			t.Fatalf("default cron meta.system_default should be true, meta=%#v", job.Meta)
+		}
+	})
+}

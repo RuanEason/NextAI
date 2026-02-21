@@ -1,10 +1,17 @@
 import { parseErrorMessage } from "./api-utils.js";
+import {
+  CronWorkflowCanvas,
+  createDefaultCronWorkflow,
+  validateCronWorkflowSpec,
+} from "./cron-workflow.js";
 import { DEFAULT_LOCALE, getLocale, isWebMessageKey, setLocale, t } from "./i18n.js";
 
 type Tone = "neutral" | "info" | "error";
 type TabKey = "chat" | "cron";
 type SettingsSectionKey = "connection" | "identity" | "display" | "models" | "channels" | "workspace";
 type ModelsSettingsLevel = "list" | "edit";
+type ChannelsSettingsLevel = "list" | "edit";
+type WorkspaceSettingsLevel = "list" | "config" | "prompt";
 type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 type ProviderKVKind = "headers" | "aliases";
 type WorkspaceEditorMode = "json" | "text";
@@ -77,6 +84,9 @@ interface ProviderInfo {
   openai_compatible?: boolean;
   api_key_prefix?: string;
   models: ModelInfo[];
+  headers?: Record<string, string>;
+  timeout_ms?: number;
+  model_aliases?: Record<string, string>;
   allow_custom_base_url?: boolean;
   enabled?: boolean;
   has_api_key: boolean;
@@ -144,13 +154,63 @@ interface CronRuntimeSpec {
   misfire_grace_seconds?: number;
 }
 
+interface CronWorkflowViewport {
+  pan_x?: number;
+  pan_y?: number;
+  zoom?: number;
+}
+
+interface CronWorkflowNode {
+  id: string;
+  type: "start" | "text_event" | "delay" | "if_event";
+  title?: string;
+  x: number;
+  y: number;
+  text?: string;
+  delay_seconds?: number;
+  if_condition?: string;
+  continue_on_error?: boolean;
+}
+
+interface CronWorkflowEdge {
+  id: string;
+  source: string;
+  target: string;
+}
+
+interface CronWorkflowSpec {
+  version: "v1";
+  viewport?: CronWorkflowViewport;
+  nodes: CronWorkflowNode[];
+  edges: CronWorkflowEdge[];
+}
+
+interface CronWorkflowNodeExecution {
+  node_id: string;
+  node_type: "text_event" | "delay" | "if_event";
+  status: "succeeded" | "failed" | "skipped";
+  continue_on_error: boolean;
+  started_at: string;
+  finished_at?: string;
+  error?: string;
+}
+
+interface CronWorkflowExecution {
+  run_id: string;
+  started_at: string;
+  finished_at?: string;
+  had_failures: boolean;
+  nodes: CronWorkflowNodeExecution[];
+}
+
 interface CronJobSpec {
   id: string;
   name: string;
   enabled: boolean;
   schedule: CronScheduleSpec;
-  task_type: string;
+  task_type: "text" | "workflow";
   text?: string;
+  workflow?: CronWorkflowSpec;
   dispatch: CronDispatchSpec;
   runtime: CronRuntimeSpec;
   meta?: Record<string, unknown>;
@@ -162,6 +222,7 @@ interface CronJobState {
   last_status?: string;
   last_error?: string;
   paused?: boolean;
+  last_execution?: CronWorkflowExecution;
 }
 
 type QQTargetType = "c2c" | "group" | "guild";
@@ -193,6 +254,9 @@ interface ViewToolCallNotice {
   summary: string;
   raw: string;
   order?: number;
+  step?: number;
+  toolName?: string;
+  outputReady?: boolean;
 }
 
 interface ViewMessageTimelineEntry {
@@ -230,11 +294,19 @@ interface JSONRequestOptions {
   headers?: Record<string, string>;
 }
 
+interface UpsertProviderOptions {
+  closeAfterSave?: boolean;
+  notifyStatus?: boolean;
+}
+
 interface CustomSelectInstance {
   container: HTMLDivElement;
   trigger: HTMLDivElement;
   selectedText: HTMLSpanElement;
   optionsList: HTMLDivElement;
+  optionsBody: HTMLDivElement;
+  searchInput: HTMLInputElement | null;
+  isSearchEnabled: boolean;
 }
 
 const DEFAULT_API_BASE = "http://127.0.0.1:8088";
@@ -242,37 +314,68 @@ const DEFAULT_API_KEY = "";
 const DEFAULT_USER_ID = "demo-user";
 const DEFAULT_CHANNEL = "console";
 const WEB_CHAT_CHANNEL = DEFAULT_CHANNEL;
+const DEFAULT_CRON_JOB_ID = "cron-default";
+const CRON_META_SYSTEM_DEFAULT = "system_default";
 const QQ_CHANNEL = "qq";
 const DEFAULT_QQ_API_BASE = "https://api.sgroup.qq.com";
 const QQ_SANDBOX_API_BASE = "https://sandbox.api.sgroup.qq.com";
 const DEFAULT_QQ_TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken";
 const DEFAULT_QQ_TIMEOUT_SECONDS = 8;
 const CHAT_LIVE_REFRESH_INTERVAL_MS = 1500;
+const PROVIDER_AUTO_SAVE_DELAY_MS = 900;
 const REQUEST_SOURCE_HEADER = "X-NextAI-Source";
 const REQUEST_SOURCE_WEB = "web";
+const CUSTOM_SELECT_OPTIONS_VERTICAL_GAP_PX = 6;
+const CUSTOM_SELECT_VISIBLE_OPTIONS_COUNT = 3;
+const CUSTOM_SELECT_OPTION_ROW_HEIGHT_PX = 38;
+const CUSTOM_SELECT_OPTIONS_LIST_VERTICAL_PADDING_PX = 8;
+const CUSTOM_SELECT_MAX_OPTIONS_HEIGHT_PX = CUSTOM_SELECT_VISIBLE_OPTIONS_COUNT * CUSTOM_SELECT_OPTION_ROW_HEIGHT_PX
+  + CUSTOM_SELECT_OPTIONS_LIST_VERTICAL_PADDING_PX;
+const CUSTOM_SELECT_SEARCH_FIELD_HEIGHT_PX = 40;
+const CUSTOM_SELECT_OPTIONS_PANEL_VERTICAL_PADDING_PX = 12;
+const CUSTOM_SELECT_MAX_PANEL_HEIGHT_PX = CUSTOM_SELECT_SEARCH_FIELD_HEIGHT_PX
+  + CUSTOM_SELECT_OPTIONS_VERTICAL_GAP_PX
+  + CUSTOM_SELECT_MAX_OPTIONS_HEIGHT_PX
+  + CUSTOM_SELECT_OPTIONS_PANEL_VERTICAL_PADDING_PX;
+const SCROLLBAR_ACTIVE_CLASS = "is-scrollbar-scrolling";
+const SCROLLBAR_IDLE_HIDE_DELAY_MS = 520;
+const DEFAULT_OPENAI_MODEL_IDS = ["gpt-4o-mini", "gpt-4.1-mini"];
+const DEFAULT_MODEL_CONTEXT_LIMIT_TOKENS = 128000;
+const SYSTEM_PROMPT_WORKSPACE_PATHS = ["docs/AI/AGENTS.md", "docs/AI/ai-tools.md"] as const;
+const SYSTEM_PROMPT_WORKSPACE_PATH_SET = new Set(SYSTEM_PROMPT_WORKSPACE_PATHS.map((path) => path.toLowerCase()));
 const SETTINGS_KEY = "nextai.web.chat.settings";
 const LOCALE_KEY = "nextai.web.locale";
 const BUILTIN_PROVIDER_IDS = new Set(["openai"]);
 const TABS: TabKey[] = ["chat", "cron"];
 const customSelectInstances = new Map<HTMLSelectElement, CustomSelectInstance>();
+const scrollbarActivityTimers = new WeakMap<HTMLElement, number>();
 let customSelectGlobalEventsBound = false;
 let chatLiveRefreshTimer: number | null = null;
 let chatLiveRefreshInFlight = false;
+let openChatRequestSerial = 0;
+let providerAutoSaveTimer: number | null = null;
+let providerAutoSaveInFlight = false;
+let providerAutoSaveQueued = false;
 let activeSettingsSection: SettingsSectionKey = "models";
+let syncingComposerModelSelectors = false;
+let systemPromptTokensLoaded = false;
+let systemPromptTokensInFlight: Promise<void> | null = null;
+let systemPromptTokens = 0;
 
 const apiBaseInput = mustElement<HTMLInputElement>("api-base");
 const apiKeyInput = mustElement<HTMLInputElement>("api-key");
-const userIdInput = mustElement<HTMLInputElement>("user-id");
-const channelInput = mustElement<HTMLInputElement>("channel");
 const localeSelect = mustElement<HTMLSelectElement>("locale-select");
 const reloadChatsButton = mustElement<HTMLButtonElement>("reload-chats");
 const settingsToggleButton = mustElement<HTMLButtonElement>("settings-toggle");
 const settingsPopover = mustElement<HTMLElement>("settings-popover");
 const settingsPopoverCloseButton = mustElement<HTMLButtonElement>("settings-popover-close");
+const chatCronToggleButton = mustElement<HTMLButtonElement>("chat-cron-toggle");
 const chatSearchToggleButton = mustElement<HTMLButtonElement>("chat-search-toggle");
 const searchModal = mustElement<HTMLElement>("search-modal");
 const searchModalCloseButton = mustElement<HTMLButtonElement>("search-modal-close-btn");
 const modelsSettingsSection = mustElement<HTMLElement>("settings-section-models");
+const channelsSettingsSection = mustElement<HTMLElement>("settings-section-channels");
+const workspaceSettingsSection = mustElement<HTMLElement>("settings-section-workspace");
 const settingsSectionButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-settings-section]"));
 const settingsSectionPanels = Array.from(document.querySelectorAll<HTMLElement>("[data-settings-section-panel]"));
 const statusLine = mustElement<HTMLElement>("status-line");
@@ -292,6 +395,11 @@ const messageList = mustElement<HTMLUListElement>("message-list");
 const composerForm = mustElement<HTMLFormElement>("composer");
 const messageInput = mustElement<HTMLTextAreaElement>("message-input");
 const sendButton = mustElement<HTMLButtonElement>("send-btn");
+const composerAttachButton = mustElement<HTMLButtonElement>("composer-attach-btn");
+const composerAttachInput = mustElement<HTMLInputElement>("composer-attach-input");
+const composerProviderSelect = mustElement<HTMLSelectElement>("composer-provider-select");
+const composerModelSelect = mustElement<HTMLSelectElement>("composer-model-select");
+const composerTokenEstimate = mustElement<HTMLElement>("composer-token-estimate");
 
 const refreshModelsButton = mustElement<HTMLButtonElement>("refresh-models");
 const modelsAddProviderButton = mustElement<HTMLButtonElement>("models-add-provider-btn");
@@ -305,7 +413,6 @@ const modelsProviderTypeSelect = mustElement<HTMLSelectElement>("models-provider
 const modelsProviderNameInput = mustElement<HTMLInputElement>("models-provider-name-input");
 const modelsProviderAPIKeyInput = mustElement<HTMLInputElement>("models-provider-api-key-input");
 const modelsProviderAPIKeyVisibilityButton = mustElement<HTMLButtonElement>("models-provider-api-key-visibility-btn");
-const modelsProviderTestButton = mustElement<HTMLButtonElement>("models-provider-test-btn");
 const modelsProviderBaseURLInput = mustElement<HTMLInputElement>("models-provider-base-url-input");
 const modelsProviderBaseURLPreview = mustElement<HTMLElement>("models-provider-base-url-preview");
 const modelsProviderTimeoutMSInput = mustElement<HTMLInputElement>("models-provider-timeout-ms-input");
@@ -317,13 +424,13 @@ const modelsProviderAliasesAddButton = mustElement<HTMLButtonElement>("models-pr
 const modelsProviderCustomModelsField = mustElement<HTMLElement>("models-provider-custom-models-field");
 const modelsProviderCustomModelsRows = mustElement<HTMLElement>("models-provider-custom-models-rows");
 const modelsProviderCustomModelsAddButton = mustElement<HTMLButtonElement>("models-provider-custom-models-add-btn");
-const modelsProviderModelsManageButton = mustElement<HTMLButtonElement>("models-provider-models-manage-btn");
-const modelsProviderModelsBody = mustElement<HTMLElement>("models-provider-models-body");
 const modelsProviderCancelButton = mustElement<HTMLButtonElement>("models-provider-cancel-btn");
 
 const refreshWorkspaceButton = mustElement<HTMLButtonElement>("refresh-workspace");
 const workspaceImportOpenButton = mustElement<HTMLButtonElement>("workspace-import-open-btn");
-const refreshQQChannelButton = mustElement<HTMLButtonElement>("refresh-qq-channel");
+const channelsEntryList = mustElement<HTMLUListElement>("channels-entry-list");
+const channelsLevel1View = mustElement<HTMLElement>("channels-level1-view");
+const channelsLevel2View = mustElement<HTMLElement>("channels-level2-view");
 const qqChannelForm = mustElement<HTMLFormElement>("qq-channel-form");
 const qqChannelEnabledInput = mustElement<HTMLInputElement>("qq-channel-enabled");
 const qqChannelAppIDInput = mustElement<HTMLInputElement>("qq-channel-app-id");
@@ -332,7 +439,12 @@ const qqChannelBotPrefixInput = mustElement<HTMLInputElement>("qq-channel-bot-pr
 const qqChannelTargetTypeSelect = mustElement<HTMLSelectElement>("qq-channel-target-type");
 const qqChannelAPIEnvironmentSelect = mustElement<HTMLSelectElement>("qq-channel-api-env");
 const qqChannelTimeoutSecondsInput = mustElement<HTMLInputElement>("qq-channel-timeout-seconds");
-const workspaceFilesBody = mustElement<HTMLTableSectionElement>("workspace-files-body");
+const workspaceEntryList = mustElement<HTMLUListElement>("workspace-entry-list");
+const workspaceLevel1View = mustElement<HTMLElement>("workspace-level1-view");
+const workspaceLevel2ConfigView = mustElement<HTMLElement>("workspace-level2-config-view");
+const workspaceLevel2PromptView = mustElement<HTMLElement>("workspace-level2-prompt-view");
+const workspaceFilesBody = mustElement<HTMLUListElement>("workspace-files-body");
+const workspacePromptsBody = mustElement<HTMLUListElement>("workspace-prompts-body");
 const workspaceCreateFileForm = mustElement<HTMLFormElement>("workspace-create-file-form");
 const workspaceNewPathInput = mustElement<HTMLInputElement>("workspace-new-path");
 const workspaceEditorModal = mustElement<HTMLElement>("workspace-editor-modal");
@@ -348,13 +460,14 @@ const workspaceImportForm = mustElement<HTMLFormElement>("workspace-import-form"
 const workspaceJSONInput = mustElement<HTMLTextAreaElement>("workspace-json");
 
 const refreshCronButton = mustElement<HTMLButtonElement>("refresh-cron");
-const cronJobsBody = mustElement<HTMLTableSectionElement>("cron-jobs-body");
+const cronChatToggleButton = mustElement<HTMLButtonElement>("cron-chat-toggle");
+const cronWorkbench = mustElement<HTMLElement>("cron-workbench");
+const cronJobsBody = mustElement<HTMLUListElement>("cron-jobs-body");
 const cronCreateOpenButton = mustElement<HTMLButtonElement>("cron-create-open-btn");
 const cronCreateModal = mustElement<HTMLElement>("cron-create-modal");
 const cronCreateModalTitle = mustElement<HTMLElement>("cron-create-modal-title");
 const cronCreateModalCloseButton = mustElement<HTMLButtonElement>("cron-create-modal-close-btn");
 const cronCreateForm = mustElement<HTMLFormElement>("cron-create-form");
-const cronCreateFormTitle = mustElement<HTMLElement>("cron-create-form-title");
 const cronDispatchHint = mustElement<HTMLElement>("cron-dispatch-hint");
 const cronIDInput = mustElement<HTMLInputElement>("cron-id");
 const cronNameInput = mustElement<HTMLInputElement>("cron-name");
@@ -363,8 +476,19 @@ const cronSessionIDInput = mustElement<HTMLInputElement>("cron-session-id");
 const cronMaxConcurrencyInput = mustElement<HTMLInputElement>("cron-max-concurrency");
 const cronTimeoutInput = mustElement<HTMLInputElement>("cron-timeout-seconds");
 const cronMisfireInput = mustElement<HTMLInputElement>("cron-misfire-grace");
-const cronEnabledInput = mustElement<HTMLInputElement>("cron-enabled");
+const cronTaskTypeSelect = mustElement<HTMLSelectElement>("cron-task-type");
 const cronTextInput = mustElement<HTMLTextAreaElement>("cron-text");
+const cronTextSection = mustElement<HTMLElement>("cron-text-section");
+const cronWorkflowSection = mustElement<HTMLElement>("cron-workflow-section");
+const cronResetWorkflowButton = mustElement<HTMLButtonElement>("cron-reset-workflow");
+const cronWorkflowFullscreenButton = mustElement<HTMLButtonElement>("cron-workflow-fullscreen-btn");
+const cronWorkflowViewport = mustElement<HTMLElement>("cron-workflow-viewport");
+const cronWorkflowCanvas = mustElement<HTMLElement>("cron-workflow-canvas");
+const cronWorkflowEdges = mustElement<SVGSVGElement>("cron-workflow-edges");
+const cronWorkflowNodes = mustElement<HTMLElement>("cron-workflow-nodes");
+const cronWorkflowNodeEditor = mustElement<HTMLElement>("cron-workflow-node-editor");
+const cronWorkflowZoom = mustElement<HTMLElement>("cron-workflow-zoom");
+const cronWorkflowExecutionList = mustElement<HTMLUListElement>("cron-workflow-execution-list");
 const cronNewSessionButton = mustElement<HTMLButtonElement>("cron-new-session");
 const cronSubmitButton = mustElement<HTMLButtonElement>("cron-submit-btn");
 
@@ -401,8 +525,9 @@ const state = {
   activeLLM: { provider_id: "", model: "" } as ModelSlotConfig,
   selectedProviderID: "",
   modelsSettingsLevel: "list" as ModelsSettingsLevel,
-  providerModelsManageOpen: false,
-  providerAPIKeyVisible: false,
+  channelsSettingsLevel: "list" as ChannelsSettingsLevel,
+  workspaceSettingsLevel: "list" as WorkspaceSettingsLevel,
+  providerAPIKeyVisible: true,
   providerModal: {
     open: false,
     mode: "create" as "create" | "edit",
@@ -420,7 +545,11 @@ const state = {
     mode: "create" as CronModalMode,
     editingJobID: "",
   },
+  cronDraftTaskType: "workflow" as "text" | "workflow",
 };
+
+let cronWorkflowEditor: CronWorkflowCanvas | null = null;
+let cronWorkflowPseudoFullscreen = false;
 
 const bootstrapTask = bootstrap();
 
@@ -428,6 +557,8 @@ async function bootstrap(): Promise<void> {
   initLocale();
   restoreSettings();
   bindEvents();
+  initAutoHideScrollbars();
+  initCronWorkflowEditor();
   initCustomSelects();
   setSettingsPopoverOpen(false);
   setSearchModalOpen(false);
@@ -441,9 +572,11 @@ async function bootstrap(): Promise<void> {
   renderChatList();
   renderSearchChatResults();
   renderMessages();
-  renderQQChannelConfig();
-  renderWorkspaceFiles();
-  renderWorkspaceEditor();
+  renderComposerModelSelectors();
+  renderComposerTokenEstimate();
+  void ensureSystemPromptTokensLoaded();
+  renderChannelsPanel();
+  renderWorkspacePanel();
   syncCronDispatchHint();
   ensureCronSessionID();
   resetProviderModalForm();
@@ -459,6 +592,179 @@ async function bootstrap(): Promise<void> {
   }
   startDraftSession();
   setStatus(t("status.noChatsDraft"), "info");
+}
+
+function initAutoHideScrollbars(): void {
+  document.addEventListener(
+    "scroll",
+    (event) => {
+      const target = resolveScrollEventTarget(event.target);
+      if (!target) {
+        return;
+      }
+      markScrollbarScrolling(target);
+    },
+    { capture: true, passive: true },
+  );
+
+  window.addEventListener(
+    "scroll",
+    () => {
+      const root = (document.scrollingElement ?? document.documentElement) as HTMLElement | null;
+      if (!root) {
+        return;
+      }
+      markScrollbarScrolling(root);
+    },
+    { passive: true },
+  );
+}
+
+function resolveScrollEventTarget(target: EventTarget | null): HTMLElement | null {
+  if (target instanceof HTMLElement) {
+    return target;
+  }
+  if (target instanceof Document) {
+    return (target.scrollingElement ?? target.documentElement) as HTMLElement | null;
+  }
+  return null;
+}
+
+function markScrollbarScrolling(element: HTMLElement): void {
+  element.classList.add(SCROLLBAR_ACTIVE_CLASS);
+  const previousTimer = scrollbarActivityTimers.get(element);
+  if (typeof previousTimer === "number") {
+    window.clearTimeout(previousTimer);
+  }
+  const timer = window.setTimeout(() => {
+    element.classList.remove(SCROLLBAR_ACTIVE_CLASS);
+    scrollbarActivityTimers.delete(element);
+  }, SCROLLBAR_IDLE_HIDE_DELAY_MS);
+  scrollbarActivityTimers.set(element, timer);
+}
+
+function renderComposerTokenEstimate(): void {
+  if (!systemPromptTokensLoaded && systemPromptTokensInFlight === null) {
+    void ensureSystemPromptTokensLoaded();
+  }
+  composerTokenEstimate.textContent = t("chat.tokensEstimate", {
+    used: formatTokensK(estimateCurrentAIContextTokens()),
+    total: formatTokensK(resolveActiveModelContextLimitTokens()),
+  });
+}
+
+function estimateTokenCount(text: string): number {
+  const normalized = text.trim();
+  if (normalized === "") {
+    return 0;
+  }
+
+  const cjkRegex = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]/g;
+  const cjkCount = normalized.match(cjkRegex)?.length ?? 0;
+  const remaining = normalized.replace(cjkRegex, " ");
+  const chunks = remaining.match(/[^\s]+/g) ?? [];
+
+  let estimate = cjkCount;
+  for (const chunk of chunks) {
+    const compact = chunk.replace(/\s+/g, "");
+    if (compact === "") {
+      continue;
+    }
+    estimate += Math.max(1, Math.ceil(compact.length / 4));
+  }
+  return estimate;
+}
+
+function estimateConversationContextTokens(): number {
+  let total = 0;
+  for (const message of state.messages) {
+    total += estimateTokenCount(message.text ?? "");
+  }
+  return total;
+}
+
+function estimateCurrentAIContextTokens(): number {
+  const conversationTokens = estimateConversationContextTokens();
+  const draftTokens = estimateTokenCount(messageInput.value);
+  return systemPromptTokens + conversationTokens + draftTokens;
+}
+
+function resolveActiveModelContextLimitTokens(): number {
+  const providerID = state.activeLLM.provider_id.trim();
+  const modelID = state.activeLLM.model.trim();
+  if (providerID === "" || modelID === "") {
+    return DEFAULT_MODEL_CONTEXT_LIMIT_TOKENS;
+  }
+  const provider = state.providers.find((item) => item.id === providerID);
+  if (!provider) {
+    return DEFAULT_MODEL_CONTEXT_LIMIT_TOKENS;
+  }
+  const model = provider.models.find((item) => item.id === modelID);
+  const contextLimit = model?.limit?.context;
+  if (typeof contextLimit !== "number" || !Number.isFinite(contextLimit) || contextLimit <= 0) {
+    return DEFAULT_MODEL_CONTEXT_LIMIT_TOKENS;
+  }
+  return Math.floor(contextLimit);
+}
+
+function formatTokensK(tokens: number): string {
+  const normalized = Number.isFinite(tokens) ? Math.max(0, tokens) : 0;
+  return `${(normalized / 1000).toFixed(1)}k`;
+}
+
+function normalizeWorkspacePathKey(path: string): string {
+  return normalizeWorkspaceInputPath(path).toLowerCase();
+}
+
+function isSystemPromptWorkspacePath(path: string): boolean {
+  return SYSTEM_PROMPT_WORKSPACE_PATH_SET.has(normalizeWorkspacePathKey(path));
+}
+
+function extractWorkspaceFileText(payload: unknown): string {
+  if (typeof payload === "string") {
+    return payload;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return "";
+  }
+  const record = payload as Record<string, unknown>;
+  return typeof record.content === "string" ? record.content : "";
+}
+
+async function loadSystemPromptTokens(): Promise<number> {
+  const tokenLoaders = SYSTEM_PROMPT_WORKSPACE_PATHS.map(async (path) => {
+    try {
+      const payload = await getWorkspaceFile(path);
+      return estimateTokenCount(extractWorkspaceFileText(payload));
+    } catch {
+      return 0;
+    }
+  });
+  const counts = await Promise.all(tokenLoaders);
+  return counts.reduce((sum, count) => sum + count, 0);
+}
+
+function ensureSystemPromptTokensLoaded(): Promise<void> {
+  if (systemPromptTokensLoaded) {
+    return Promise.resolve();
+  }
+  if (systemPromptTokensInFlight) {
+    return systemPromptTokensInFlight;
+  }
+  systemPromptTokensInFlight = (async () => {
+    systemPromptTokens = await loadSystemPromptTokens();
+    systemPromptTokensLoaded = true;
+    renderComposerTokenEstimate();
+  })().finally(() => {
+    systemPromptTokensInFlight = null;
+  });
+  return systemPromptTokensInFlight;
+}
+
+function invalidateSystemPromptTokensCacheAndReload(): void {
+  systemPromptTokensLoaded = false;
+  systemPromptTokens = 0;
+  void ensureSystemPromptTokensLoaded();
 }
 
 function ensureChatLiveRefreshLoop(): void {
@@ -488,8 +794,12 @@ async function refreshActiveChatLive(): Promise<void> {
       return;
     }
     const history = await requestJSON<ChatHistoryResponse>(`/chats/${encodeURIComponent(activeChatID)}`);
+    if (state.activeChatId !== activeChatID) {
+      return;
+    }
     state.messages = history.messages.map(toViewMessage);
-    renderMessages();
+    renderMessages({ animate: false });
+    renderComposerTokenEstimate();
     renderChatHeader();
     renderChatList();
     renderSearchChatResults();
@@ -508,6 +818,15 @@ function bindEvents(): void {
         void switchTab(tab);
       }
     });
+  });
+
+  chatCronToggleButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void switchTab("cron");
+  });
+  cronChatToggleButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void switchTab("chat");
   });
 
   chatSearchToggleButton.addEventListener("click", (event) => {
@@ -564,13 +883,21 @@ function bindEvents(): void {
     if (!(target instanceof Node)) {
       return;
     }
-    if (settingsPopover.contains(target) || settingsToggleButton.contains(target)) {
+    if (
+      settingsPopover.contains(target)
+      || settingsToggleButton.contains(target)
+      || workspaceEditorModal.contains(target)
+      || workspaceImportModal.contains(target)
+    ) {
       return;
     }
     setSettingsPopoverOpen(false);
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !isSettingsPopoverOpen()) {
+      return;
+    }
+    if (isWorkspaceEditorModalOpen() || isWorkspaceImportModalOpen()) {
       return;
     }
     setSettingsPopoverOpen(false);
@@ -607,9 +934,6 @@ function bindEvents(): void {
     await handleControlChange(false);
   });
 
-  userIdInput.addEventListener("change", async () => {
-    await handleControlChange(true);
-  });
   localeSelect.addEventListener("change", () => {
     const locale = setLocale(localeSelect.value);
     localeSelect.value = locale;
@@ -641,6 +965,22 @@ function bindEvents(): void {
     event.preventDefault();
     void sendMessage();
   });
+  messageInput.addEventListener("input", () => {
+    renderComposerTokenEstimate();
+  });
+  composerAttachButton.addEventListener("click", () => {
+    composerAttachInput.click();
+  });
+  composerAttachInput.addEventListener("change", () => {
+    appendComposerAttachmentMentions(composerAttachInput.files);
+    composerAttachInput.value = "";
+  });
+  composerProviderSelect.addEventListener("change", () => {
+    void handleComposerProviderSelectChange();
+  });
+  composerModelSelect.addEventListener("change", () => {
+    void handleComposerModelSelectChange();
+  });
 
   refreshModelsButton.addEventListener("click", async () => {
     await refreshModels();
@@ -654,26 +994,28 @@ function bindEvents(): void {
   });
   modelsProviderHeadersAddButton.addEventListener("click", () => {
     appendProviderKVRow(modelsProviderHeadersRows, "headers");
+    scheduleProviderAutoSave();
   });
   modelsProviderAliasesAddButton.addEventListener("click", () => {
-    setProviderModelsManageMode(true);
     appendProviderKVRow(modelsProviderAliasesRows, "aliases");
-  });
-  modelsProviderModelsManageButton.addEventListener("click", () => {
-    setProviderModelsManageMode(!state.providerModelsManageOpen);
+    scheduleProviderAutoSave();
   });
   modelsProviderTypeSelect.addEventListener("change", () => {
     syncProviderCustomModelsField(modelsProviderTypeSelect.value);
-  });
-  modelsProviderTestButton.addEventListener("click", () => {
-    setStatus(t("status.providerTestNotImplemented"), "info");
+    scheduleProviderAutoSave();
   });
   modelsProviderBaseURLInput.addEventListener("input", () => {
     renderProviderBaseURLPreview();
   });
   modelsProviderCustomModelsAddButton.addEventListener("click", () => {
-    setProviderModelsManageMode(true);
     appendCustomModelRow(modelsProviderCustomModelsRows);
+    scheduleProviderAutoSave();
+  });
+  modelsProviderForm.addEventListener("input", () => {
+    scheduleProviderAutoSave();
+  });
+  modelsProviderForm.addEventListener("change", () => {
+    scheduleProviderAutoSave();
   });
   modelsProviderForm.addEventListener("click", (event) => {
     const target = event.target;
@@ -703,6 +1045,7 @@ function bindEvents(): void {
             appendProviderKVRow(container, kind);
           }
         }
+        scheduleProviderAutoSave();
       }
     }
 
@@ -717,6 +1060,7 @@ function bindEvents(): void {
       if (customContainer && customContainer.children.length === 0) {
         appendCustomModelRow(customContainer);
       }
+      scheduleProviderAutoSave();
     }
   });
   modelsProviderCancelButton.addEventListener("click", () => {
@@ -754,8 +1098,47 @@ function bindEvents(): void {
   refreshWorkspaceButton.addEventListener("click", async () => {
     await refreshWorkspace();
   });
-  refreshQQChannelButton.addEventListener("click", async () => {
-    await refreshQQChannelConfig();
+  workspaceSettingsSection.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const button = target.closest<HTMLButtonElement>("button[data-workspace-action]");
+    if (!button) {
+      return;
+    }
+    const action = button.dataset.workspaceAction;
+    if (action === "open-config") {
+      setWorkspaceSettingsLevel("config");
+      renderWorkspacePanel();
+      return;
+    }
+    if (action === "open-prompt") {
+      setWorkspaceSettingsLevel("prompt");
+      renderWorkspacePanel();
+      return;
+    }
+    if (action === "back") {
+      setWorkspaceSettingsLevel("list");
+      renderWorkspacePanel();
+    }
+  });
+  channelsEntryList.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const button = target.closest<HTMLButtonElement>("button[data-channel-action]");
+    if (!button) {
+      return;
+    }
+    const action = button.dataset.channelAction;
+    if (action !== "open") {
+      return;
+    }
+    setChannelsSettingsLevel("edit");
+    renderChannelsPanel();
+    qqChannelEnabledInput.focus();
   });
   qqChannelForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -790,7 +1173,7 @@ function bindEvents(): void {
   workspaceImportModalCloseButton.addEventListener("click", () => {
     setWorkspaceImportModalOpen(false);
   });
-  workspaceFilesBody.addEventListener("click", async (event) => {
+  const handleWorkspaceFilesClick = async (event: Event): Promise<void> => {
     const target = event.target;
     if (!(target instanceof Element)) {
       return;
@@ -812,6 +1195,12 @@ function bindEvents(): void {
       return;
     }
     await deleteWorkspaceFile(path);
+  };
+  workspaceFilesBody.addEventListener("click", (event) => {
+    void handleWorkspaceFilesClick(event);
+  });
+  workspacePromptsBody.addEventListener("click", (event) => {
+    void handleWorkspaceFilesClick(event);
   });
   workspaceEditorForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -844,22 +1233,49 @@ function bindEvents(): void {
   cronCreateOpenButton.addEventListener("click", () => {
     setCronModalMode("create");
     syncCronDispatchHint();
+    cronIDInput.value = "";
+    cronNameInput.value = "";
+    cronIntervalInput.value = "60s";
     ensureCronSessionID();
+    cronMaxConcurrencyInput.value = "1";
+    cronTimeoutInput.value = "30";
+    cronMisfireInput.value = "0";
+    cronTextInput.value = "";
+    state.cronDraftTaskType = "workflow";
+    cronTaskTypeSelect.value = "workflow";
+    syncCronTaskModeUI();
+    cronWorkflowEditor?.setWorkflow(createDefaultCronWorkflow());
+    renderCronExecutionDetails(undefined);
     setCronCreateModalOpen(true);
-  });
-  cronCreateModal.addEventListener("click", (event) => {
-    const target = event.target;
-    if (target instanceof Element && target.closest("[data-cron-create-close=\"true\"]")) {
-      setCronCreateModalOpen(false);
-      return;
-    }
-    event.stopPropagation();
   });
   cronCreateModalCloseButton.addEventListener("click", () => {
     setCronCreateModalOpen(false);
   });
+  cronTaskTypeSelect.addEventListener("change", () => {
+    const value = cronTaskTypeSelect.value === "text" ? "text" : "workflow";
+    state.cronDraftTaskType = value;
+    syncCronTaskModeUI();
+  });
+  cronResetWorkflowButton.addEventListener("click", () => {
+    cronWorkflowEditor?.resetToDefault();
+  });
+  cronWorkflowFullscreenButton.addEventListener("click", () => {
+    void toggleCronWorkflowFullscreen();
+  });
+  document.addEventListener("fullscreenchange", () => {
+    if (!isCronWorkflowNativeFullscreen() && cronWorkflowPseudoFullscreen) {
+      setCronWorkflowPseudoFullscreen(false);
+      return;
+    }
+    syncCronWorkflowFullscreenUI();
+  });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !isCronCreateModalOpen()) {
+      return;
+    }
+    if (isCronWorkflowFullscreenActive()) {
+      event.preventDefault();
+      void exitCronWorkflowFullscreen();
       return;
     }
     setCronCreateModalOpen(false);
@@ -873,10 +1289,24 @@ function bindEvents(): void {
   });
   cronCreateForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const created = await saveCronJob();
-    if (created) {
-      setCronCreateModalOpen(false);
+    await saveCronJob();
+  });
+  cronJobsBody.addEventListener("change", async (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) {
+      return;
     }
+    const jobID = target.dataset.cronToggleEnabled ?? "";
+    if (jobID === "") {
+      return;
+    }
+    const enabled = target.checked;
+    target.disabled = true;
+    const saved = await updateCronJobEnabled(jobID, enabled);
+    if (!saved) {
+      target.checked = !enabled;
+    }
+    target.disabled = false;
   });
   cronJobsBody.addEventListener("click", async (event) => {
     const target = event.target;
@@ -909,7 +1339,7 @@ function bindEvents(): void {
 
 function initCustomSelects(): void {
   document.body.classList.add("select-enhanced");
-  const selects = Array.from(document.querySelectorAll<HTMLSelectElement>(".controls select, .stack-form select"));
+  const selects = Array.from(document.querySelectorAll<HTMLSelectElement>("select"));
   for (const select of selects) {
     if (customSelectInstances.has(select)) {
       continue;
@@ -925,9 +1355,11 @@ function enhanceSelectControl(select: HTMLSelectElement): void {
   if (!parent) {
     return;
   }
+  const isSearchEnabled = select.dataset.selectSearch !== "off";
 
   const container = document.createElement("div");
   container.className = "custom-select-container";
+  container.classList.toggle("without-search", !isSearchEnabled);
   parent.insertBefore(container, select);
   container.appendChild(select);
   select.dataset.customSelectNative = "true";
@@ -959,7 +1391,26 @@ function enhanceSelectControl(select: HTMLSelectElement): void {
 
   const optionsList = document.createElement("div");
   optionsList.className = "options-list";
-  optionsList.setAttribute("role", "listbox");
+
+  const optionsBody = document.createElement("div");
+  optionsBody.className = "options-body";
+  optionsBody.setAttribute("role", "listbox");
+
+  let searchInput: HTMLInputElement | null = null;
+  if (isSearchEnabled) {
+    const searchField = document.createElement("div");
+    searchField.className = "options-search";
+    searchInput = document.createElement("input");
+    searchInput.className = "options-search-input";
+    searchInput.type = "search";
+    searchInput.autocomplete = "off";
+    searchInput.spellcheck = false;
+    searchInput.placeholder = t("tab.search");
+    searchInput.setAttribute("aria-label", t("search.inputLabel"));
+    searchField.appendChild(searchInput);
+    optionsList.append(searchField);
+  }
+  optionsList.append(optionsBody);
 
   container.append(trigger, optionsList);
   customSelectInstances.set(select, {
@@ -967,6 +1418,9 @@ function enhanceSelectControl(select: HTMLSelectElement): void {
     trigger,
     selectedText,
     optionsList,
+    optionsBody,
+    searchInput,
+    isSearchEnabled,
   });
 
   trigger.addEventListener("click", (event) => {
@@ -987,7 +1441,7 @@ function enhanceSelectControl(select: HTMLSelectElement): void {
       return;
     }
     const optionElement = target.closest<HTMLElement>(".option");
-    if (!optionElement || optionElement.classList.contains("disabled")) {
+    if (!optionElement || optionElement.classList.contains("disabled") || optionElement.classList.contains("is-hidden")) {
       return;
     }
     const value = optionElement.dataset.value ?? "";
@@ -996,6 +1450,31 @@ function enhanceSelectControl(select: HTMLSelectElement): void {
     trigger.focus();
     event.stopPropagation();
   });
+
+  optionsList.addEventListener(
+    "wheel",
+    (event) => {
+      if (!(event instanceof WheelEvent)) {
+        return;
+      }
+      if (optionsBody.scrollHeight <= optionsBody.clientHeight) {
+        return;
+      }
+      optionsBody.scrollTop += event.deltaY;
+      event.preventDefault();
+    },
+    { passive: false },
+  );
+
+  if (searchInput) {
+    searchInput.addEventListener("input", () => {
+      filterCustomSelectOptions(select, searchInput.value);
+    });
+
+    searchInput.addEventListener("keydown", (event) => {
+      handleCustomSelectSearchKeydown(event, select);
+    });
+  }
 
   select.addEventListener("change", () => {
     syncCustomSelect(select);
@@ -1059,6 +1538,41 @@ function handleCustomSelectTriggerKeydown(event: KeyboardEvent, select: HTMLSele
   openCustomSelect(select);
 }
 
+function handleCustomSelectSearchKeydown(event: KeyboardEvent, select: HTMLSelectElement): void {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeCustomSelect(select);
+    const instance = customSelectInstances.get(select);
+    instance?.trigger.focus();
+    return;
+  }
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+    return;
+  }
+  event.preventDefault();
+  const offset = event.key === "ArrowDown" ? 1 : -1;
+  const options = getCustomSelectNavigableOptionElements(select);
+  if (options.length === 0) {
+    return;
+  }
+  const selectedIndex = options.findIndex((item) => item.classList.contains("selected"));
+  const nextIndex = selectedIndex === -1
+    ? (offset > 0 ? 0 : options.length - 1)
+    : (selectedIndex + offset + options.length) % options.length;
+  const nextOption = options[nextIndex];
+  if (!nextOption) {
+    return;
+  }
+  const nextValue = nextOption.dataset.value ?? "";
+  if (nextValue === "") {
+    return;
+  }
+  selectCustomOption(select, nextValue);
+  if (typeof nextOption.scrollIntoView === "function") {
+    nextOption.scrollIntoView({ block: "nearest" });
+  }
+}
+
 function syncAllCustomSelects(): void {
   for (const select of customSelectInstances.keys()) {
     syncCustomSelect(select);
@@ -1071,12 +1585,14 @@ function syncCustomSelect(select: HTMLSelectElement): void {
     return;
   }
 
-  instance.optionsList.innerHTML = "";
+  instance.optionsBody.innerHTML = "";
   for (const option of Array.from(select.options)) {
     const optionElement = document.createElement("div");
     optionElement.className = "option";
     optionElement.dataset.value = option.value;
-    optionElement.textContent = option.textContent ?? "";
+    const text = (option.textContent ?? "").trim();
+    optionElement.textContent = text;
+    optionElement.dataset.searchText = text.toLowerCase();
     optionElement.setAttribute("role", "option");
     optionElement.setAttribute("aria-selected", String(option.selected));
     if (option.disabled) {
@@ -1086,11 +1602,16 @@ function syncCustomSelect(select: HTMLSelectElement): void {
     if (option.selected) {
       optionElement.classList.add("selected");
     }
-    instance.optionsList.appendChild(optionElement);
+    instance.optionsBody.appendChild(optionElement);
   }
 
   const selectedOption = Array.from(select.selectedOptions)[0] ?? select.options[select.selectedIndex] ?? select.options[0];
   instance.selectedText.textContent = selectedOption?.textContent?.trim() || "";
+  if (instance.searchInput) {
+    instance.searchInput.placeholder = t("tab.search");
+    instance.searchInput.setAttribute("aria-label", t("search.inputLabel"));
+  }
+  filterCustomSelectOptions(select, instance.searchInput?.value ?? "");
   instance.container.classList.toggle("is-disabled", select.disabled);
   instance.trigger.setAttribute("aria-disabled", String(select.disabled));
   instance.trigger.tabIndex = select.disabled ? -1 : 0;
@@ -1129,8 +1650,16 @@ function openCustomSelect(select: HTMLSelectElement): void {
     return;
   }
   closeAllCustomSelects(select);
+  if (instance.searchInput) {
+    instance.searchInput.value = "";
+  }
+  filterCustomSelectOptions(select, "");
+  applyCustomSelectOpenDirection(select);
   instance.container.classList.add("open");
   instance.trigger.setAttribute("aria-expanded", "true");
+  if (instance.searchInput) {
+    instance.searchInput.focus();
+  }
 }
 
 function closeCustomSelect(select: HTMLSelectElement): void {
@@ -1140,16 +1669,100 @@ function closeCustomSelect(select: HTMLSelectElement): void {
   }
   instance.container.classList.remove("open");
   instance.trigger.setAttribute("aria-expanded", "false");
+  if (instance.searchInput && instance.searchInput.value !== "") {
+    instance.searchInput.value = "";
+    filterCustomSelectOptions(select, "");
+  }
 }
 
 function closeAllCustomSelects(except?: HTMLSelectElement): void {
-  for (const [select, instance] of customSelectInstances.entries()) {
+  for (const [select] of customSelectInstances.entries()) {
     if (select === except) {
       continue;
     }
-    instance.container.classList.remove("open");
-    instance.trigger.setAttribute("aria-expanded", "false");
+    closeCustomSelect(select);
   }
+}
+
+function applyCustomSelectOpenDirection(select: HTMLSelectElement): void {
+  const instance = customSelectInstances.get(select);
+  if (!instance) {
+    return;
+  }
+  const optionCount = Math.max(instance.optionsBody.childElementCount, select.options.length, 1);
+  const searchSectionHeight = instance.isSearchEnabled
+    ? CUSTOM_SELECT_SEARCH_FIELD_HEIGHT_PX + CUSTOM_SELECT_OPTIONS_VERTICAL_GAP_PX
+    : 0;
+  const maxPanelHeight = searchSectionHeight
+    + CUSTOM_SELECT_MAX_OPTIONS_HEIGHT_PX
+    + CUSTOM_SELECT_OPTIONS_PANEL_VERTICAL_PADDING_PX;
+  const estimatedOptionsHeight = Math.min(optionCount * CUSTOM_SELECT_OPTION_ROW_HEIGHT_PX, CUSTOM_SELECT_MAX_OPTIONS_HEIGHT_PX);
+  const estimatedPanelHeight = Math.min(searchSectionHeight + estimatedOptionsHeight + CUSTOM_SELECT_OPTIONS_PANEL_VERTICAL_PADDING_PX, maxPanelHeight);
+  const panelHeight = Math.min(
+    Math.max(instance.optionsList.scrollHeight, estimatedPanelHeight),
+    maxPanelHeight,
+  );
+  const requiredSpace = panelHeight + CUSTOM_SELECT_OPTIONS_VERTICAL_GAP_PX;
+  const triggerRect = instance.trigger.getBoundingClientRect();
+  const bounds = resolveCustomSelectVerticalBounds(instance.container);
+  const availableBelow = Math.max(0, bounds.bottom - triggerRect.bottom);
+  const availableAbove = Math.max(0, triggerRect.top - bounds.top);
+  const shouldOpenUpward = availableBelow < requiredSpace && availableAbove > availableBelow;
+  instance.container.classList.toggle("open-upward", shouldOpenUpward);
+}
+
+function getCustomSelectNavigableOptionElements(select: HTMLSelectElement): HTMLElement[] {
+  const instance = customSelectInstances.get(select);
+  if (!instance) {
+    return [];
+  }
+  return Array.from(instance.optionsBody.querySelectorAll<HTMLElement>(".option"))
+    .filter((option) => !option.classList.contains("disabled") && !option.classList.contains("is-hidden"));
+}
+
+function filterCustomSelectOptions(select: HTMLSelectElement, queryText: string): void {
+  const instance = customSelectInstances.get(select);
+  if (!instance) {
+    return;
+  }
+  const query = queryText.trim().toLowerCase();
+  for (const option of Array.from(instance.optionsBody.querySelectorAll<HTMLElement>(".option"))) {
+    const label = option.dataset.searchText ?? "";
+    const visible = query === "" || label.includes(query);
+    option.classList.toggle("is-hidden", !visible);
+    option.setAttribute("aria-hidden", String(!visible));
+  }
+}
+
+function resolveCustomSelectVerticalBounds(container: HTMLElement): { top: number; bottom: number } {
+  const viewportBottom = window.innerHeight || document.documentElement.clientHeight || 0;
+  let top = 0;
+  let bottom = viewportBottom;
+  let current: HTMLElement | null = container.parentElement;
+  while (current) {
+    const computed = window.getComputedStyle(current);
+    if (isClippingOverflowValue(computed.overflow) || isClippingOverflowValue(computed.overflowY)) {
+      const rect = current.getBoundingClientRect();
+      top = Math.max(top, rect.top);
+      bottom = Math.min(bottom, rect.bottom);
+    }
+    current = current.parentElement;
+  }
+  if (bottom <= top) {
+    return {
+      top: 0,
+      bottom: viewportBottom,
+    };
+  }
+  return { top, bottom };
+}
+
+function isClippingOverflowValue(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized.includes("hidden")
+    || normalized.includes("auto")
+    || normalized.includes("scroll")
+    || normalized.includes("clip");
 }
 
 function isSettingsPopoverOpen(): boolean {
@@ -1194,12 +1807,22 @@ function setActiveSettingsSection(section: SettingsSectionKey): void {
     renderModelsPanel();
     return;
   }
-  if (section === "channels" && !state.tabLoaded.channels) {
-    void refreshQQChannelConfig();
+  if (section === "channels") {
+    setChannelsSettingsLevel("list");
+    if (!state.tabLoaded.channels) {
+      void refreshQQChannelConfig();
+      return;
+    }
+    renderChannelsPanel();
     return;
   }
-  if (section === "workspace" && !state.tabLoaded.workspace) {
-    void refreshWorkspace();
+  if (section === "workspace") {
+    setWorkspaceSettingsLevel("list");
+    if (!state.tabLoaded.workspace) {
+      void refreshWorkspace();
+      return;
+    }
+    renderWorkspacePanel();
   }
 }
 
@@ -1239,10 +1862,75 @@ function isCronCreateModalOpen(): boolean {
 }
 
 function setCronCreateModalOpen(open: boolean): void {
+  if (!open && isCronWorkflowFullscreenActive()) {
+    void exitCronWorkflowFullscreen();
+  }
   cronCreateModal.classList.toggle("is-hidden", !open);
   cronCreateModal.setAttribute("aria-hidden", String(!open));
   cronCreateOpenButton.setAttribute("aria-expanded", String(open));
-  document.body.classList.toggle("cron-create-open", open);
+  cronCreateOpenButton.hidden = open;
+  cronWorkbench.dataset.cronView = open ? "editor" : "jobs";
+}
+
+function supportsNativeCronWorkflowFullscreen(): boolean {
+  const section = cronWorkflowSection as HTMLElement & {
+    requestFullscreen?: () => Promise<void>;
+  };
+  return typeof section.requestFullscreen === "function" && typeof document.exitFullscreen === "function" && document.fullscreenEnabled === true;
+}
+
+function isCronWorkflowNativeFullscreen(): boolean {
+  return document.fullscreenElement === cronWorkflowSection;
+}
+
+function isCronWorkflowFullscreenActive(): boolean {
+  return isCronWorkflowNativeFullscreen() || cronWorkflowPseudoFullscreen;
+}
+
+function syncCronWorkflowFullscreenUI(): void {
+  const active = isCronWorkflowFullscreenActive();
+  const label = t(active ? "cron.exitFullscreen" : "cron.enterFullscreen");
+  cronWorkflowFullscreenButton.textContent = label;
+  cronWorkflowFullscreenButton.setAttribute("aria-label", label);
+  cronWorkflowFullscreenButton.title = label;
+  cronWorkflowFullscreenButton.setAttribute("aria-pressed", String(active));
+}
+
+function setCronWorkflowPseudoFullscreen(active: boolean): void {
+  cronWorkflowPseudoFullscreen = active;
+  cronWorkflowSection.classList.toggle("is-pseudo-fullscreen", active);
+  document.body.classList.toggle("cron-workflow-pseudo-fullscreen", active);
+  syncCronWorkflowFullscreenUI();
+}
+
+async function enterCronWorkflowFullscreen(): Promise<void> {
+  if (supportsNativeCronWorkflowFullscreen()) {
+    const section = cronWorkflowSection as HTMLElement & {
+      requestFullscreen: () => Promise<void>;
+    };
+    await section.requestFullscreen();
+    return;
+  }
+  setCronWorkflowPseudoFullscreen(true);
+}
+
+async function exitCronWorkflowFullscreen(): Promise<void> {
+  if (isCronWorkflowNativeFullscreen() && typeof document.exitFullscreen === "function") {
+    await document.exitFullscreen();
+    return;
+  }
+  if (cronWorkflowPseudoFullscreen) {
+    setCronWorkflowPseudoFullscreen(false);
+  }
+}
+
+async function toggleCronWorkflowFullscreen(): Promise<void> {
+  if (isCronWorkflowFullscreenActive()) {
+    await exitCronWorkflowFullscreen();
+  } else {
+    await enterCronWorkflowFullscreen();
+  }
+  syncCronWorkflowFullscreenUI();
 }
 
 function setCronModalMode(mode: CronModalMode, editingJobID = ""): void {
@@ -1250,13 +1938,9 @@ function setCronModalMode(mode: CronModalMode, editingJobID = ""): void {
   state.cronModal.editingJobID = editingJobID;
 
   const createMode = mode === "create";
-  const titleKey = createMode ? "cron.createTextJob" : "cron.updateTextJob";
-  const submitKey = createMode ? "cron.submitCreate" : "cron.submitUpdate";
-
-  cronCreateModalTitle.textContent = t(titleKey);
-  cronCreateFormTitle.textContent = t(titleKey);
-  cronSubmitButton.textContent = t(submitKey);
   cronIDInput.readOnly = !createMode;
+  refreshCronModalTitles();
+  syncCronTaskModeUI();
 }
 
 function initLocale(): void {
@@ -1299,22 +1983,29 @@ function applyLocaleToDocument(): void {
   renderChatList();
   renderSearchChatResults();
   renderMessages();
+  renderComposerModelSelectors();
+  renderComposerTokenEstimate();
   if (state.tabLoaded.models) {
     renderModelsPanel();
   }
   if (state.tabLoaded.channels) {
-    renderQQChannelConfig();
+    renderChannelsPanel();
   }
   if (state.tabLoaded.workspace) {
-    renderWorkspaceFiles();
-    renderWorkspaceEditor();
+    renderWorkspacePanel();
   }
   if (state.tabLoaded.cron) {
     renderCronJobs();
+    if (state.cronModal.mode === "edit") {
+      renderCronExecutionDetails(state.cronStates[state.cronModal.editingJobID]);
+    }
   }
+  cronWorkflowEditor?.refreshLabels();
   setCronModalMode(state.cronModal.mode, state.cronModal.editingJobID);
+  syncCronWorkflowFullscreenUI();
   syncCronDispatchHint();
   syncAllCustomSelects();
+  logComposerStatusToConsole();
 }
 
 async function handleControlChange(resetDraft: boolean): Promise<void> {
@@ -1360,6 +2051,9 @@ function renderTabPanels(): void {
     const tab = button.dataset.tab;
     button.classList.toggle("active", tab === state.activeTab);
   });
+  const cronActive = state.activeTab === "cron";
+  chatCronToggleButton.classList.toggle("is-active", cronActive);
+  chatCronToggleButton.setAttribute("aria-pressed", String(cronActive));
 
   TABS.forEach((tab) => {
     panelByTab[tab].classList.toggle("is-active", tab === state.activeTab);
@@ -1399,33 +2093,26 @@ function restoreSettings(): void {
       if (typeof parsed.apiKey === "string") {
         state.apiKey = parsed.apiKey.trim();
       }
-      if (typeof parsed.userId === "string" && parsed.userId.trim() !== "") {
-        state.userId = parsed.userId.trim();
-      }
     } catch {
       localStorage.removeItem(SETTINGS_KEY);
     }
   }
+  state.userId = DEFAULT_USER_ID;
   state.channel = WEB_CHAT_CHANNEL;
   apiBaseInput.value = state.apiBase;
   apiKeyInput.value = state.apiKey;
-  userIdInput.value = state.userId;
-  channelInput.value = WEB_CHAT_CHANNEL;
-  channelInput.readOnly = true;
 }
 
 function syncControlState(): void {
   state.apiBase = apiBaseInput.value.trim() || DEFAULT_API_BASE;
   state.apiKey = apiKeyInput.value.trim();
-  state.userId = userIdInput.value.trim() || DEFAULT_USER_ID;
+  state.userId = DEFAULT_USER_ID;
   state.channel = WEB_CHAT_CHANNEL;
-  channelInput.value = WEB_CHAT_CHANNEL;
   localStorage.setItem(
     SETTINGS_KEY,
     JSON.stringify({
       apiBase: state.apiBase,
       apiKey: state.apiKey,
-      userId: state.userId,
     }),
   );
 }
@@ -1494,19 +2181,29 @@ async function openChat(chatID: string): Promise<void> {
     return;
   }
 
+  const requestSerial = ++openChatRequestSerial;
   state.activeChatId = chat.id;
   state.activeSessionId = chat.session_id;
   renderChatHeader();
-  renderChatList();
-  renderSearchChatResults();
+  syncActiveChatSelections();
 
   try {
     const history = await requestJSON<ChatHistoryResponse>(`/chats/${encodeURIComponent(chat.id)}`);
+    if (requestSerial !== openChatRequestSerial || state.activeChatId !== chat.id) {
+      return;
+    }
     state.messages = history.messages.map(toViewMessage);
-    renderMessages();
+    renderMessages({ animate: false });
     setStatus(t("status.loadedMessages", { count: history.messages.length }), "info");
   } catch (error) {
+    if (requestSerial !== openChatRequestSerial || state.activeChatId !== chat.id) {
+      return;
+    }
     setStatus(asErrorMessage(error), "error");
+  } finally {
+    if (requestSerial === openChatRequestSerial && state.activeChatId === chat.id) {
+      renderComposerTokenEstimate();
+    }
   }
 }
 
@@ -1555,6 +2252,7 @@ async function deleteChat(chatID: string): Promise<void> {
 }
 
 function startDraftSession(): void {
+  openChatRequestSerial += 1;
   state.activeChatId = null;
   state.activeSessionId = newSessionID();
   state.messages = [];
@@ -1562,6 +2260,7 @@ function startDraftSession(): void {
   renderChatList();
   renderSearchChatResults();
   renderMessages();
+  renderComposerTokenEstimate();
 }
 
 async function sendMessage(): Promise<void> {
@@ -1577,7 +2276,7 @@ async function sendMessage(): Promise<void> {
     return;
   }
 
-  if (state.apiBase === "" || state.userId === "") {
+  if (state.apiBase === "") {
     setStatus(t("status.controlsRequired"), "error");
     return;
   }
@@ -1623,6 +2322,7 @@ async function sendMessage(): Promise<void> {
   }
   renderMessages();
   messageInput.value = "";
+  renderComposerTokenEstimate();
   setStatus(t("status.streamingReply"), "info");
 
   try {
@@ -1658,11 +2358,48 @@ async function sendMessage(): Promise<void> {
       renderSearchChatResults();
     }
   } catch (error) {
-    setStatus(asErrorMessage(error), "error");
+    const message = asErrorMessage(error);
+    fillAssistantErrorMessageIfPending(assistantID, message);
+    setStatus(message, "error");
   } finally {
     state.sending = false;
     sendButton.disabled = false;
+    renderComposerTokenEstimate();
   }
+}
+
+function appendComposerAttachmentMentions(files: FileList | null): void {
+  if (!files || files.length === 0) {
+    return;
+  }
+  const mentions: string[] = [];
+  for (const file of Array.from(files)) {
+    const normalizedName = normalizeAttachmentName(file.name);
+    if (normalizedName === "") {
+      continue;
+    }
+    mentions.push(`@${normalizedName}`);
+  }
+  if (mentions.length === 0) {
+    return;
+  }
+  const mentionLine = mentions.join(" ");
+  const existing = messageInput.value.trimEnd();
+  messageInput.value = existing === "" ? mentionLine : `${existing}\n${mentionLine}`;
+  messageInput.focus();
+  const cursor = messageInput.value.length;
+  messageInput.setSelectionRange(cursor, cursor);
+  renderComposerTokenEstimate();
+  setStatus(
+    t("status.composerAttachmentsAdded", {
+      count: mentions.length,
+    }),
+    "info",
+  );
+}
+
+function normalizeAttachmentName(raw: string): string {
+  return raw.replace(/[\r\n\t]+/g, " ").trim();
 }
 
 async function streamReply(
@@ -1836,6 +2573,7 @@ function renderChatList(): void {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "chat-item-btn";
+    button.dataset.chatId = chat.id;
     if (chat.id === state.activeChatId) {
       button.classList.add("active");
     }
@@ -1850,7 +2588,6 @@ function renderChatList(): void {
     const meta = document.createElement("span");
     meta.className = "chat-meta";
     meta.textContent = t("chat.meta", {
-      sessionId: chat.session_id,
       updatedAt: compactTime(chat.updated_at),
     });
 
@@ -1873,6 +2610,7 @@ function renderChatList(): void {
     li.appendChild(actions);
     chatList.appendChild(li);
   });
+  syncActiveChatSelections();
 }
 
 function renderSearchChatResults(): void {
@@ -1902,6 +2640,7 @@ function renderSearchChatResults(): void {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "chat-item-btn search-result-btn";
+    button.dataset.chatId = chat.id;
     if (chat.id === state.activeChatId) {
       button.classList.add("active");
     }
@@ -1927,6 +2666,7 @@ function renderSearchChatResults(): void {
     li.appendChild(button);
     searchChatResults.appendChild(li);
   });
+  syncActiveChatSelections();
 }
 
 function filterChatsForSearch(query: string): ChatSpec[] {
@@ -1938,27 +2678,45 @@ function filterChatsForSearch(query: string): ChatSpec[] {
 }
 
 function buildChatSearchText(chat: ChatSpec): string {
-  return [chat.name, chat.session_id, chat.id, chat.user_id, chat.channel, stringifyChatMeta(chat.meta)].join(" ").toLowerCase();
+  return [chat.name, chat.session_id, chat.user_id, chat.channel, resolveChatCronJobID(chat.meta)].join(" ").toLowerCase();
 }
 
-function stringifyChatMeta(meta: Record<string, unknown> | undefined): string {
+function resolveChatCronJobID(meta: Record<string, unknown> | undefined): string {
   if (!meta) {
     return "";
   }
-  try {
-    return JSON.stringify(meta);
-  } catch {
-    return "";
+  const raw = meta.cron_job_id;
+  if (typeof raw === "string") {
+    return raw;
   }
+  if (typeof raw === "number") {
+    return String(raw);
+  }
+  return "";
 }
 
 function renderChatHeader(): void {
   const active = state.chats.find((chat) => chat.id === state.activeChatId);
   chatTitle.textContent = active ? active.name : t("chat.draftTitle");
-  chatSession.textContent = state.activeSessionId;
+  const sessionId = state.activeSessionId;
+  chatSession.textContent = sessionId;
+  chatSession.title = sessionId;
 }
 
-function renderMessages(): void {
+function syncActiveChatSelections(): void {
+  const activeChatID = state.activeChatId ?? "";
+  chatList.querySelectorAll<HTMLButtonElement>(".chat-item-btn[data-chat-id]").forEach((button) => {
+    const chatID = button.dataset.chatId ?? "";
+    button.classList.toggle("active", chatID !== "" && chatID === activeChatID);
+  });
+  searchChatResults.querySelectorAll<HTMLButtonElement>(".search-result-btn[data-chat-id]").forEach((button) => {
+    const chatID = button.dataset.chatId ?? "";
+    button.classList.toggle("active", chatID !== "" && chatID === activeChatID);
+  });
+}
+
+function renderMessages(options: { animate?: boolean } = {}): void {
+  const animate = options.animate ?? true;
   messageList.innerHTML = "";
   if (state.messages.length === 0) {
     const empty = document.createElement("li");
@@ -1971,6 +2729,9 @@ function renderMessages(): void {
   for (const message of state.messages) {
     const item = document.createElement("li");
     item.className = `message ${message.role}`;
+    if (!animate) {
+      item.classList.add("no-anim");
+    }
     item.dataset.messageId = message.id;
     renderMessageNode(item, message);
     messageList.appendChild(item);
@@ -1999,14 +2760,17 @@ function nextMessageOutputOrder(): number {
 }
 
 function handleToolCallEvent(event: AgentStreamEvent, assistantID: string): void {
-  if (event.type !== "tool_call") {
+  if (event.type === "tool_call") {
+    const notice = formatToolCallNotice(event);
+    if (!notice) {
+      return;
+    }
+    appendToolCallNoticeToAssistant(assistantID, notice);
     return;
   }
-  const notice = formatToolCallNotice(event);
-  if (!notice) {
-    return;
+  if (event.type === "tool_result") {
+    applyToolResultEvent(event, assistantID);
   }
-  appendToolCallNoticeToAssistant(assistantID, notice);
 }
 
 function appendToolCallNoticeToAssistant(assistantID: string, notice: ViewToolCallNotice): void {
@@ -2057,15 +2821,40 @@ function appendAssistantDelta(message: ViewMessage, delta: string): void {
   });
 }
 
+function fillAssistantErrorMessageIfPending(assistantID: string, rawMessage: string): void {
+  const target = state.messages.find((item) => item.id === assistantID);
+  if (!target || target.role !== "assistant" || target.text.trim() !== "") {
+    return;
+  }
+  const message = rawMessage.trim();
+  if (message === "") {
+    return;
+  }
+  appendAssistantDelta(target, message);
+  renderMessageInPlace(assistantID);
+}
+
 function formatToolCallNotice(event: AgentStreamEvent): ViewToolCallNotice | null {
-  const raw = formatToolCallRaw(event);
-  if (raw === "") {
+  const toolName = normalizeToolName(event.tool_call?.name);
+  const detail = formatToolCallDetail(event);
+  if (detail === "") {
     return null;
   }
   return {
     summary: formatToolCallSummary(event.tool_call),
-    raw,
+    raw: detail,
+    step: parsePositiveInteger(event.step),
+    toolName: toolName === "" ? undefined : toolName,
+    outputReady: toolName === "shell" ? false : true,
   };
+}
+
+function formatToolCallDetail(event: AgentStreamEvent): string {
+  const toolName = normalizeToolName(event.tool_call?.name);
+  if (toolName === "shell") {
+    return t("chat.toolCallOutputPending");
+  }
+  return formatToolCallRaw(event);
 }
 
 function formatToolCallRaw(event: AgentStreamEvent): string {
@@ -2085,6 +2874,66 @@ function formatToolCallRaw(event: AgentStreamEvent): string {
     }
   }
   return "";
+}
+
+function applyToolResultEvent(event: AgentStreamEvent, assistantID: string): void {
+  const toolName = normalizeToolName(event.tool_result?.name);
+  if (toolName !== "shell") {
+    return;
+  }
+  const output = formatToolResultOutput(event.tool_result);
+  const target = state.messages.find((item) => item.id === assistantID);
+  if (!target) {
+    return;
+  }
+  const step = parsePositiveInteger(event.step);
+  const notice = findPendingToolCallNotice(target.toolCalls, toolName, step);
+  if (notice) {
+    notice.raw = output;
+    notice.outputReady = true;
+    renderMessageInPlace(assistantID);
+    return;
+  }
+  appendToolCallNoticeToAssistant(assistantID, {
+    summary: "bash",
+    raw: output,
+    step,
+    toolName,
+    outputReady: true,
+  });
+}
+
+function findPendingToolCallNotice(
+  notices: ViewToolCallNotice[],
+  toolName: string,
+  step?: number,
+): ViewToolCallNotice | undefined {
+  for (let idx = notices.length - 1; idx >= 0; idx -= 1) {
+    const item = notices[idx];
+    if (item.toolName !== toolName || item.outputReady) {
+      continue;
+    }
+    if (step !== undefined && item.step !== undefined && item.step !== step) {
+      continue;
+    }
+    return item;
+  }
+  return undefined;
+}
+
+function normalizeToolName(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim();
+}
+
+function formatToolResultOutput(toolResult?: AgentToolResultPayload): string {
+  const summary = typeof toolResult?.summary === "string" ? toolResult.summary.trim() : "";
+  if (summary !== "") {
+    return summary;
+  }
+  return t("chat.toolCallOutputUnavailable");
 }
 
 function formatToolCallSummary(toolCall?: AgentToolCallPayload): string {
@@ -2260,20 +3109,24 @@ function normalizeTimeline(entries: ViewMessageTimelineEntry[]): ViewMessageTime
   return merged;
 }
 
-async function refreshModels(): Promise<void> {
+async function refreshModels(options: { silent?: boolean } = {}): Promise<void> {
   syncControlState();
   try {
     const result = await syncModelState({ autoActivate: true });
     state.tabLoaded.models = true;
     renderModelsPanel();
-    setStatus(
-      t(result.source === "catalog" ? "status.providersLoadedCatalog" : "status.providersLoadedLegacy", {
-        count: result.providers.length,
-      }),
-      "info",
-    );
+    if (!options.silent) {
+      setStatus(
+        t(result.source === "catalog" ? "status.providersLoadedCatalog" : "status.providersLoadedLegacy", {
+          count: result.providers.length,
+        }),
+        "info",
+      );
+    }
   } catch (error) {
-    setStatus(asErrorMessage(error), "error");
+    if (!options.silent) {
+      setStatus(asErrorMessage(error), "error");
+    }
   }
 }
 
@@ -2289,11 +3142,13 @@ async function syncModelState(options: { autoActivate: boolean }): Promise<{
   state.providerTypes = result.providerTypes;
   state.modelDefaults = result.defaults;
   state.activeLLM = result.activeLLM;
+  renderComposerModelSelectors();
 
   if (options.autoActivate) {
     const autoActivated = await maybeAutoActivateModel(result.providers, result.defaults, result.activeLLM);
     if (autoActivated) {
       state.activeLLM = autoActivated;
+      renderComposerModelSelectors();
       return {
         ...result,
         activeLLM: autoActivated,
@@ -2398,20 +3253,321 @@ async function loadModelCatalog(): Promise<{
   }
 }
 
+function listSelectableProviders(): ProviderInfo[] {
+  return state.providers.filter((provider) => provider.enabled !== false && provider.models.length > 0);
+}
+
+function appendSelectOption(select: HTMLSelectElement, value: string, label: string): void {
+  const option = document.createElement("option");
+  option.value = value;
+  option.textContent = label;
+  select.appendChild(option);
+}
+
+function resolveComposerProvider(providers: ProviderInfo[]): ProviderInfo | null {
+  if (providers.length === 0) {
+    return null;
+  }
+  const active = providers.find((provider) => provider.id === state.activeLLM.provider_id);
+  if (active) {
+    return active;
+  }
+  const selected = providers.find((provider) => provider.id === composerProviderSelect.value.trim());
+  if (selected) {
+    return selected;
+  }
+  const withDefault = providers.find((provider) => {
+    const defaultModel = (state.modelDefaults[provider.id] ?? "").trim();
+    return defaultModel !== "" && provider.models.some((model) => model.id === defaultModel);
+  });
+  return withDefault ?? providers[0];
+}
+
+function formatComposerModelLabel(model: ModelInfo): string {
+  const modelID = model.id.trim();
+  const aliasOf = (model.alias_of ?? "").trim();
+  if (aliasOf !== "" && aliasOf !== modelID) {
+    return `${modelID} -> ${aliasOf}`;
+  }
+  const modelName = (model.name ?? "").trim();
+  if (modelName !== "" && modelName !== modelID) {
+    return `${modelName} (${modelID})`;
+  }
+  return modelID;
+}
+
+function resolveComposerModelID(provider: ProviderInfo): string {
+  const activeModel = state.activeLLM.provider_id === provider.id ? state.activeLLM.model.trim() : "";
+  if (activeModel !== "" && provider.models.some((model) => model.id === activeModel)) {
+    return activeModel;
+  }
+  const selectedModel = composerModelSelect.value.trim();
+  if (selectedModel !== "" && provider.models.some((model) => model.id === selectedModel)) {
+    return selectedModel;
+  }
+  const defaultModel = (state.modelDefaults[provider.id] ?? "").trim();
+  if (defaultModel !== "" && provider.models.some((model) => model.id === defaultModel)) {
+    return defaultModel;
+  }
+  return provider.models[0]?.id?.trim() ?? "";
+}
+
+function renderComposerModelOptions(provider: ProviderInfo | null): string {
+  composerModelSelect.innerHTML = "";
+  if (!provider || provider.models.length === 0) {
+    appendSelectOption(composerModelSelect, "", t("models.noModelOption"));
+    composerModelSelect.value = "";
+    composerModelSelect.disabled = true;
+    syncCustomSelect(composerModelSelect);
+    return "";
+  }
+
+  for (const model of provider.models) {
+    appendSelectOption(composerModelSelect, model.id, formatComposerModelLabel(model));
+  }
+
+  const resolvedModelID = resolveComposerModelID(provider);
+  composerModelSelect.value = resolvedModelID;
+  composerModelSelect.disabled = resolvedModelID === "";
+  syncCustomSelect(composerModelSelect);
+  return resolvedModelID;
+}
+
+function renderComposerModelSelectors(): void {
+  const providers = listSelectableProviders();
+  syncingComposerModelSelectors = true;
+  try {
+    composerProviderSelect.innerHTML = "";
+    if (providers.length === 0) {
+      appendSelectOption(composerProviderSelect, "", t("models.noProviderOption"));
+      composerProviderSelect.value = "";
+      composerProviderSelect.disabled = true;
+      renderComposerModelOptions(null);
+      syncCustomSelect(composerProviderSelect);
+      return;
+    }
+
+    for (const provider of providers) {
+      appendSelectOption(composerProviderSelect, provider.id, formatProviderLabel(provider));
+    }
+
+    const selectedProvider = resolveComposerProvider(providers);
+    if (!selectedProvider) {
+      composerProviderSelect.value = "";
+      composerProviderSelect.disabled = true;
+      renderComposerModelOptions(null);
+      syncCustomSelect(composerProviderSelect);
+      return;
+    }
+
+    composerProviderSelect.value = selectedProvider.id;
+    composerProviderSelect.disabled = false;
+    syncCustomSelect(composerProviderSelect);
+    renderComposerModelOptions(selectedProvider);
+  } finally {
+    syncingComposerModelSelectors = false;
+    renderComposerTokenEstimate();
+  }
+}
+
+async function handleComposerProviderSelectChange(): Promise<void> {
+  if (syncingComposerModelSelectors) {
+    return;
+  }
+  const providers = listSelectableProviders();
+  const selectedProvider = providers.find((provider) => provider.id === composerProviderSelect.value.trim()) ?? null;
+  syncingComposerModelSelectors = true;
+  let selectedModelID = "";
+  try {
+    selectedModelID = renderComposerModelOptions(selectedProvider);
+  } finally {
+    syncingComposerModelSelectors = false;
+  }
+  if (!selectedProvider || selectedModelID === "") {
+    return;
+  }
+  await setActiveModel(selectedProvider.id, selectedModelID);
+}
+
+async function handleComposerModelSelectChange(): Promise<void> {
+  if (syncingComposerModelSelectors) {
+    return;
+  }
+  const providerID = composerProviderSelect.value.trim();
+  const modelID = composerModelSelect.value.trim();
+  if (providerID === "" || modelID === "") {
+    setStatus(t("error.providerAndModelRequired"), "error");
+    return;
+  }
+  await setActiveModel(providerID, modelID);
+}
+
+async function setActiveModel(providerID: string, modelID: string): Promise<boolean> {
+  const normalizedProviderID = providerID.trim();
+  const normalizedModelID = modelID.trim();
+  if (normalizedProviderID === "" || normalizedModelID === "") {
+    setStatus(t("error.providerAndModelRequired"), "error");
+    return false;
+  }
+  if (state.activeLLM.provider_id === normalizedProviderID && state.activeLLM.model === normalizedModelID) {
+    state.selectedProviderID = normalizedProviderID;
+    return true;
+  }
+  syncControlState();
+  try {
+    const out = await requestJSON<ActiveModelsInfo>("/models/active", {
+      method: "PUT",
+      body: {
+        provider_id: normalizedProviderID,
+        model: normalizedModelID,
+      },
+    });
+    const normalized = normalizeModelSlot(out.active_llm);
+    state.activeLLM =
+      normalized.provider_id === "" || normalized.model === ""
+        ? {
+            provider_id: normalizedProviderID,
+            model: normalizedModelID,
+          }
+        : normalized;
+    state.selectedProviderID = state.activeLLM.provider_id;
+    renderComposerModelSelectors();
+    if (state.tabLoaded.models) {
+      renderModelsPanel();
+    }
+    setStatus(
+      t("status.activeModelUpdated", {
+        providerId: state.activeLLM.provider_id,
+        model: state.activeLLM.model,
+      }),
+      "info",
+    );
+    return true;
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+    renderComposerModelSelectors();
+    return false;
+  }
+}
+
 function renderModelsPanel(): void {
   syncSelectedProviderID();
   renderProviderNavigation();
   renderModelsSettingsLevel();
   renderProviderBaseURLPreview();
-  setProviderModelsManageMode(state.providerModelsManageOpen);
   setProviderAPIKeyVisibility(state.providerAPIKeyVisible);
 }
 
-function setProviderModelsManageMode(open: boolean): void {
-  state.providerModelsManageOpen = open;
-  modelsProviderModelsBody.hidden = !open;
-  modelsProviderModelsManageButton.classList.toggle("is-active", open);
-  modelsProviderModelsManageButton.setAttribute("aria-pressed", String(open));
+function setChannelsSettingsLevel(level: ChannelsSettingsLevel): void {
+  state.channelsSettingsLevel = level === "edit" ? "edit" : "list";
+  const showEdit = state.channelsSettingsLevel === "edit";
+  channelsLevel1View.hidden = showEdit;
+  channelsLevel2View.hidden = !showEdit;
+  channelsSettingsSection.classList.toggle("is-level2-active", showEdit);
+}
+
+function renderChannelNavigation(): void {
+  channelsEntryList.innerHTML = "";
+
+  const entry = document.createElement("li");
+  entry.className = "models-provider-card-entry";
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "models-provider-card channels-entry-card";
+  button.dataset.channelAction = "open";
+  button.dataset.channelId = QQ_CHANNEL;
+  if (state.channelsSettingsLevel === "edit") {
+    button.classList.add("is-selected");
+  }
+  button.setAttribute("aria-pressed", String(state.channelsSettingsLevel === "edit"));
+
+  const title = document.createElement("span");
+  title.className = "models-provider-card-title";
+  title.textContent = t("workspace.qqChannelTitle");
+
+  const enabledMeta = document.createElement("span");
+  enabledMeta.className = "models-provider-card-meta";
+  enabledMeta.textContent = t("models.enabledLine", {
+    enabled: state.qqChannelConfig.enabled ? t("common.yes") : t("common.no"),
+  });
+
+  const environmentMeta = document.createElement("span");
+  environmentMeta.className = "models-provider-card-meta";
+  const environment = resolveQQAPIEnvironment(state.qqChannelConfig.api_base);
+  const environmentLabel = environment === "sandbox"
+    ? t("workspace.qqAPIEnvironmentSandbox")
+    : t("workspace.qqAPIEnvironmentProduction");
+  environmentMeta.textContent = `${t("workspace.qqAPIEnvironment")}: ${environmentLabel}`;
+
+  button.append(title, enabledMeta, environmentMeta);
+  entry.appendChild(button);
+  channelsEntryList.appendChild(entry);
+}
+
+function renderChannelsPanel(): void {
+  renderChannelNavigation();
+  renderQQChannelConfig();
+  setChannelsSettingsLevel(state.channelsSettingsLevel);
+}
+
+function setWorkspaceSettingsLevel(level: WorkspaceSettingsLevel): void {
+  state.workspaceSettingsLevel = level === "config" || level === "prompt" ? level : "list";
+  const showList = state.workspaceSettingsLevel === "list";
+  workspaceLevel1View.hidden = !showList;
+  workspaceLevel2ConfigView.hidden = state.workspaceSettingsLevel !== "config";
+  workspaceLevel2PromptView.hidden = state.workspaceSettingsLevel !== "prompt";
+  workspaceSettingsSection.classList.toggle("is-level2-active", !showList);
+}
+
+function renderWorkspaceNavigation(configCount: number, promptCount: number): void {
+  workspaceEntryList.innerHTML = "";
+
+  const configEntry = document.createElement("li");
+  configEntry.className = "models-provider-card-entry";
+  const configButton = document.createElement("button");
+  configButton.type = "button";
+  configButton.className = "models-provider-card channels-entry-card workspace-entry-card";
+  configButton.dataset.workspaceAction = "open-config";
+  if (state.workspaceSettingsLevel === "config") {
+    configButton.classList.add("is-selected");
+  }
+  configButton.setAttribute("aria-pressed", String(state.workspaceSettingsLevel === "config"));
+  const configTitle = document.createElement("span");
+  configTitle.className = "models-provider-card-title";
+  configTitle.textContent = t("workspace.configCardTitle");
+  const configDesc = document.createElement("span");
+  configDesc.className = "models-provider-card-meta";
+  configDesc.textContent = t("workspace.briefGeneric");
+  const configCountMeta = document.createElement("span");
+  configCountMeta.className = "models-provider-card-meta";
+  configCountMeta.textContent = t("workspace.cardFileCount", { count: configCount });
+  configButton.append(configTitle, configDesc, configCountMeta);
+  configEntry.appendChild(configButton);
+  workspaceEntryList.appendChild(configEntry);
+
+  const promptEntry = document.createElement("li");
+  promptEntry.className = "models-provider-card-entry";
+  const promptButton = document.createElement("button");
+  promptButton.type = "button";
+  promptButton.className = "models-provider-card channels-entry-card workspace-entry-card";
+  promptButton.dataset.workspaceAction = "open-prompt";
+  if (state.workspaceSettingsLevel === "prompt") {
+    promptButton.classList.add("is-selected");
+  }
+  promptButton.setAttribute("aria-pressed", String(state.workspaceSettingsLevel === "prompt"));
+  const promptTitle = document.createElement("span");
+  promptTitle.className = "models-provider-card-title";
+  promptTitle.textContent = t("workspace.promptCardTitle");
+  const promptDesc = document.createElement("span");
+  promptDesc.className = "models-provider-card-meta";
+  promptDesc.textContent = t("workspace.briefAITools");
+  const promptCountMeta = document.createElement("span");
+  promptCountMeta.className = "models-provider-card-meta";
+  promptCountMeta.textContent = t("workspace.cardFileCount", { count: promptCount });
+  promptButton.append(promptTitle, promptDesc, promptCountMeta);
+  promptEntry.appendChild(promptButton);
+  workspaceEntryList.appendChild(promptEntry);
 }
 
 function setProviderAPIKeyVisibility(visible: boolean): void {
@@ -2498,6 +3654,12 @@ function renderProviderNavigation(): void {
     keyMeta.className = "models-provider-card-meta";
     keyMeta.textContent = provider.has_api_key ? t("models.apiKeyConfigured", { value: t("models.apiKeyMasked") }) : t("models.apiKeyUnset");
 
+    const providerTypeMeta = document.createElement("span");
+    providerTypeMeta.className = "models-provider-card-meta";
+    providerTypeMeta.textContent = t("models.providerTypeLine", {
+      providerType: providerTypeDisplayName(resolveProviderType(provider)),
+    });
+
     const deleteButton = document.createElement("button");
     const deleteLabel = t("models.deleteProvider");
     deleteButton.type = "button";
@@ -2508,7 +3670,7 @@ function renderProviderNavigation(): void {
     deleteButton.title = deleteLabel;
     deleteButton.innerHTML = TRASH_ICON_SVG;
 
-    button.append(title, enabledMeta, keyMeta);
+    button.append(title, enabledMeta, keyMeta, providerTypeMeta);
     entry.append(button, deleteButton);
     modelsProviderList.appendChild(entry);
   }
@@ -2590,10 +3752,22 @@ function resolveProviderIDForUpsert(selectedProviderType: string): string {
     return "";
   }
   if (selectedProviderType === "openai") {
-    return "openai";
+    return ensureUniqueProviderID("openai");
   }
   const baseProviderID = slugifyProviderID(modelsProviderNameInput.value) || slugifyProviderID(selectedProviderType) || "provider";
   return ensureUniqueProviderID(baseProviderID);
+}
+
+function resolveOpenAIDuplicateModelAliases(): Record<string, string> {
+  const modelIDs = (state.providers.find((provider) => provider.id === "openai")?.models ?? [])
+    .map((model) => model.id.trim())
+    .filter((modelID) => modelID !== "");
+  const source = modelIDs.length > 0 ? modelIDs : DEFAULT_OPENAI_MODEL_IDS;
+  const out: Record<string, string> = {};
+  for (const modelID of source) {
+    out[modelID] = modelID;
+  }
+  return out;
 }
 
 function providerSupportsCustomModels(providerTypeID: string): boolean {
@@ -2610,6 +3784,55 @@ function syncProviderCustomModelsField(providerTypeID: string): void {
   }
   if (!enabled) {
     resetProviderCustomModelsEditor();
+  }
+}
+
+function isProviderAutoSaveEnabled(): boolean {
+  return state.providerModal.open && state.providerModal.mode === "edit" && state.providerModal.editingProviderID !== "";
+}
+
+function resetProviderAutoSaveScheduling(): void {
+  if (providerAutoSaveTimer !== null) {
+    window.clearTimeout(providerAutoSaveTimer);
+    providerAutoSaveTimer = null;
+  }
+  providerAutoSaveQueued = false;
+}
+
+function scheduleProviderAutoSave(): void {
+  if (!isProviderAutoSaveEnabled()) {
+    return;
+  }
+  if (providerAutoSaveTimer !== null) {
+    window.clearTimeout(providerAutoSaveTimer);
+  }
+  providerAutoSaveTimer = window.setTimeout(() => {
+    providerAutoSaveTimer = null;
+    void flushProviderAutoSave();
+  }, PROVIDER_AUTO_SAVE_DELAY_MS);
+}
+
+async function flushProviderAutoSave(): Promise<void> {
+  if (!isProviderAutoSaveEnabled()) {
+    return;
+  }
+  if (providerAutoSaveInFlight) {
+    providerAutoSaveQueued = true;
+    return;
+  }
+
+  providerAutoSaveInFlight = true;
+  try {
+    await upsertProvider({
+      closeAfterSave: false,
+      notifyStatus: false,
+    });
+  } finally {
+    providerAutoSaveInFlight = false;
+    if (providerAutoSaveQueued) {
+      providerAutoSaveQueued = false;
+      scheduleProviderAutoSave();
+    }
   }
 }
 
@@ -2703,12 +3926,12 @@ function resetProviderModalForm(): void {
   resetProviderKVEditor(modelsProviderAliasesRows, "aliases");
   resetProviderCustomModelsEditor();
   syncProviderCustomModelsField("openai");
-  setProviderModelsManageMode(false);
-  setProviderAPIKeyVisibility(false);
+  setProviderAPIKeyVisibility(true);
   renderProviderBaseURLPreview();
 }
 
 function openProviderModal(mode: "create" | "edit", providerID = ""): void {
+  resetProviderAutoSaveScheduling();
   state.providerModal.mode = mode;
   state.providerModal.open = true;
   state.providerModal.editingProviderID = providerID;
@@ -2731,10 +3954,10 @@ function openProviderModal(mode: "create" | "edit", providerID = ""): void {
 }
 
 function closeProviderModal(): void {
+  resetProviderAutoSaveScheduling();
   state.providerModal.open = false;
   state.providerModal.editingProviderID = "";
-  setProviderModelsManageMode(false);
-  setProviderAPIKeyVisibility(false);
+  setProviderAPIKeyVisibility(true);
   setModelsSettingsLevel("list");
   renderModelsSettingsLevel();
 }
@@ -2751,33 +3974,41 @@ function populateProviderForm(providerID: string): void {
   modelsProviderAPIKeyInput.value = "";
   modelsProviderBaseURLInput.value = provider.current_base_url ?? "";
   modelsProviderEnabledInput.checked = provider.enabled !== false;
-  modelsProviderTimeoutMSInput.value = "";
-  resetProviderKVEditor(modelsProviderHeadersRows, "headers");
-  populateProviderAliasRows(provider.models);
+  modelsProviderTimeoutMSInput.value = typeof provider.timeout_ms === "number" ? String(provider.timeout_ms) : "";
+  populateProviderHeaderRows(provider);
+  populateProviderAliasRows(provider);
   populateProviderCustomModelsRows(provider);
   syncProviderCustomModelsField(resolveProviderType(provider));
-  setProviderModelsManageMode(false);
-  setProviderAPIKeyVisibility(false);
+  setProviderAPIKeyVisibility(true);
   renderProviderBaseURLPreview();
   setStatus(t("status.providerLoadedForEdit", { providerId: provider.id }), "info");
 }
 
-async function upsertProvider(): Promise<void> {
+async function upsertProvider(options: UpsertProviderOptions = {}): Promise<boolean> {
+  const closeAfterSave = options.closeAfterSave ?? true;
+  const notifyStatus = options.notifyStatus ?? true;
+  if (closeAfterSave) {
+    resetProviderAutoSaveScheduling();
+  }
   syncControlState();
   const selectedProviderType = normalizeProviderTypeValue(modelsProviderTypeSelect.value);
   const providerID = resolveProviderIDForUpsert(selectedProviderType);
   if (providerID === "") {
-    setStatus(t("error.providerTypeRequired"), "error");
-    return;
+    if (notifyStatus) {
+      setStatus(t("error.providerTypeRequired"), "error");
+    }
+    return false;
   }
 
-  let timeoutMS: number | undefined;
+  let timeoutMS = 0;
   const timeoutRaw = modelsProviderTimeoutMSInput.value.trim();
   if (timeoutRaw !== "") {
     const parsed = Number.parseInt(timeoutRaw, 10);
     if (Number.isNaN(parsed) || parsed < 0) {
-      setStatus(t("error.providerTimeoutInvalid"), "error");
-      return;
+      if (notifyStatus) {
+        setStatus(t("error.providerTimeoutInvalid"), "error");
+      }
+      return false;
     }
     timeoutMS = parsed;
   }
@@ -2789,8 +4020,10 @@ async function upsertProvider(): Promise<void> {
       invalidValue: (key) => t("error.invalidProviderHeadersValue", { key }),
     });
   } catch (error) {
-    setStatus(asErrorMessage(error), "error");
-    return;
+    if (notifyStatus) {
+      setStatus(asErrorMessage(error), "error");
+    }
+    return false;
   }
 
   let aliases: Record<string, string> | undefined;
@@ -2800,8 +4033,10 @@ async function upsertProvider(): Promise<void> {
       invalidValue: (key) => t("error.invalidProviderAliasesValue", { key }),
     });
   } catch (error) {
-    setStatus(asErrorMessage(error), "error");
-    return;
+    if (notifyStatus) {
+      setStatus(asErrorMessage(error), "error");
+    }
+    return false;
   }
 
   const customModelsEnabled =
@@ -2813,8 +4048,10 @@ async function upsertProvider(): Promise<void> {
     try {
       customModels = collectCustomModelIDs(modelsProviderCustomModelsRows);
     } catch (error) {
-      setStatus(asErrorMessage(error), "error");
-      return;
+      if (notifyStatus) {
+        setStatus(asErrorMessage(error), "error");
+      }
+      return false;
     }
   }
 
@@ -2830,12 +4067,8 @@ async function upsertProvider(): Promise<void> {
   if (baseURL !== "") {
     payload.base_url = baseURL;
   }
-  if (typeof timeoutMS === "number") {
-    payload.timeout_ms = timeoutMS;
-  }
-  if (headers) {
-    payload.headers = headers;
-  }
+  payload.timeout_ms = timeoutMS;
+  payload.headers = headers ?? {};
   const mergedAliases: Record<string, string> = {};
   if (aliases) {
     Object.assign(mergedAliases, aliases);
@@ -2847,9 +4080,15 @@ async function upsertProvider(): Promise<void> {
       }
     }
   }
-  if (Object.keys(mergedAliases).length > 0) {
-    payload.model_aliases = mergedAliases;
+  if (
+    state.providerModal.mode === "create" &&
+    selectedProviderType === "openai" &&
+    providerID !== "openai" &&
+    Object.keys(mergedAliases).length === 0
+  ) {
+    Object.assign(mergedAliases, resolveOpenAIDuplicateModelAliases());
   }
+  payload.model_aliases = mergedAliases;
 
   try {
     const out = await requestJSON<ProviderInfo>(`/models/${encodeURIComponent(providerID)}/config`, {
@@ -2857,18 +4096,28 @@ async function upsertProvider(): Promise<void> {
       body: payload,
     });
     state.selectedProviderID = out.id ?? providerID;
-    setModelsSettingsLevel("list");
-    await refreshModels();
-    closeProviderModal();
-    modelsProviderAPIKeyInput.value = "";
-    setStatus(
-      t(state.providerModal.mode === "create" ? "status.providerCreated" : "status.providerUpdated", {
-        providerId: out.id,
-      }),
-      "info",
-    );
+    if (closeAfterSave) {
+      setModelsSettingsLevel("list");
+    }
+    await refreshModels({ silent: !notifyStatus });
+    if (closeAfterSave) {
+      closeProviderModal();
+      modelsProviderAPIKeyInput.value = "";
+    }
+    if (notifyStatus) {
+      setStatus(
+        t(state.providerModal.mode === "create" ? "status.providerCreated" : "status.providerUpdated", {
+          providerId: out.id,
+        }),
+        "info",
+      );
+    }
+    return true;
   } catch (error) {
-    setStatus(asErrorMessage(error), "error");
+    if (notifyStatus) {
+      setStatus(asErrorMessage(error), "error");
+    }
+    return false;
   }
 }
 
@@ -2901,22 +4150,61 @@ function resetProviderCustomModelsEditor(): void {
   appendCustomModelRow(modelsProviderCustomModelsRows);
 }
 
-function populateProviderAliasRows(models: ModelInfo[]): void {
+function collectProviderModelAliases(provider: ProviderInfo): Map<string, string> {
   const aliases = new Map<string, string>();
-  for (const model of models) {
-    const alias = model.id.trim();
-    const target = (model.alias_of ?? "").trim();
-    if (alias === "" || target === "") {
+  for (const [alias, target] of Object.entries(provider.model_aliases ?? {})) {
+    const aliasID = alias.trim();
+    const targetID = target.trim();
+    if (aliasID === "" || targetID === "") {
       continue;
     }
-    aliases.set(alias, target);
+    aliases.set(aliasID, targetID);
   }
+  for (const model of provider.models) {
+    const alias = model.id.trim();
+    if (alias === "" || aliases.has(alias)) {
+      continue;
+    }
+    const target = (model.alias_of ?? "").trim();
+    if (target !== "") {
+      aliases.set(alias, target);
+      continue;
+    }
+    if (!BUILTIN_PROVIDER_IDS.has(provider.id)) {
+      aliases.set(alias, alias);
+    }
+  }
+  return aliases;
+}
+
+function populateProviderHeaderRows(provider: ProviderInfo): void {
+  const headerEntries = Object.entries(provider.headers ?? {})
+    .map(([key, value]) => [key.trim(), value.trim()] as const)
+    .filter(([key, value]) => key !== "" && value !== "")
+    .sort(([left], [right]) => left.localeCompare(right));
+
+  modelsProviderHeadersRows.innerHTML = "";
+  if (headerEntries.length === 0) {
+    appendProviderKVRow(modelsProviderHeadersRows, "headers");
+    return;
+  }
+  for (const [key, value] of headerEntries) {
+    appendProviderKVRow(modelsProviderHeadersRows, "headers", key, value);
+  }
+}
+
+function populateProviderAliasRows(provider: ProviderInfo): void {
+  const aliases = collectProviderModelAliases(provider);
+  const aliasEntries = Array.from(aliases.entries())
+    .filter(([alias, target]) => BUILTIN_PROVIDER_IDS.has(provider.id) || alias !== target)
+    .sort(([left], [right]) => left.localeCompare(right));
+
   modelsProviderAliasesRows.innerHTML = "";
-  if (aliases.size === 0) {
+  if (aliasEntries.length === 0) {
     appendProviderKVRow(modelsProviderAliasesRows, "aliases");
     return;
   }
-  for (const [alias, target] of aliases.entries()) {
+  for (const [alias, target] of aliasEntries) {
     appendProviderKVRow(modelsProviderAliasesRows, "aliases", alias, target);
   }
 }
@@ -2927,10 +4215,10 @@ function populateProviderCustomModelsRows(provider: ProviderInfo): void {
     return;
   }
 
-  const customModelIDs = provider.models
-    .filter((item) => (item.alias_of ?? "").trim() === "")
-    .map((item) => item.id.trim())
-    .filter((item) => item !== "");
+  const customModelIDs = Array.from(collectProviderModelAliases(provider).entries())
+    .filter(([alias, target]) => alias === target)
+    .map(([alias]) => alias)
+    .sort((left, right) => left.localeCompare(right));
   if (customModelIDs.length === 0) {
     return;
   }
@@ -3144,7 +4432,7 @@ async function refreshQQChannelConfig(options: { silent?: boolean } = {}): Promi
     state.qqChannelConfig = normalizeQQChannelConfig(raw);
     state.qqChannelAvailable = true;
     state.tabLoaded.channels = true;
-    renderQQChannelConfig();
+    renderChannelsPanel();
     if (!options.silent) {
       setStatus(t("status.qqChannelLoaded"), "info");
     }
@@ -3152,7 +4440,7 @@ async function refreshQQChannelConfig(options: { silent?: boolean } = {}): Promi
     state.qqChannelConfig = defaultQQChannelConfig();
     state.qqChannelAvailable = false;
     state.tabLoaded.channels = false;
-    renderQQChannelConfig();
+    renderChannelsPanel();
     if (!options.silent) {
       setStatus(asErrorMessage(error), "error");
     }
@@ -3188,7 +4476,8 @@ async function saveQQChannelConfig(): Promise<void> {
     });
     state.qqChannelConfig = normalizeQQChannelConfig(out ?? payload);
     state.qqChannelAvailable = true;
-    renderQQChannelConfig();
+    setChannelsSettingsLevel("list");
+    renderChannelsPanel();
     setStatus(t("status.qqChannelSaved"), "info");
   } catch (error) {
     setStatus(asErrorMessage(error), "error");
@@ -3203,8 +4492,7 @@ async function refreshWorkspace(options: { silent?: boolean } = {}): Promise<voi
     if (state.activeWorkspacePath !== "" && !files.some((file) => file.path === state.activeWorkspacePath)) {
       clearWorkspaceSelection();
     }
-    renderWorkspaceFiles();
-    renderWorkspaceEditor();
+    renderWorkspacePanel();
     state.tabLoaded.workspace = true;
     if (!options.silent) {
       setStatus(t("status.workspaceFilesLoaded", { count: files.length }), "info");
@@ -3214,47 +4502,117 @@ async function refreshWorkspace(options: { silent?: boolean } = {}): Promise<voi
   }
 }
 
+function renderWorkspacePanel(): void {
+  renderWorkspaceFiles();
+  renderWorkspaceEditor();
+  setWorkspaceSettingsLevel(state.workspaceSettingsLevel);
+}
+
 function renderWorkspaceFiles(): void {
-  workspaceFilesBody.innerHTML = "";
-  if (state.workspaceFiles.length === 0) {
-    const row = document.createElement("tr");
-    const col = document.createElement("td");
-    col.colSpan = 3;
-    col.className = "empty-cell";
-    col.textContent = t("workspace.empty");
-    row.appendChild(col);
-    workspaceFilesBody.appendChild(row);
+  const { configFiles, promptFiles } = splitWorkspaceFiles(state.workspaceFiles);
+  renderWorkspaceNavigation(configFiles.length, promptFiles.length);
+  renderWorkspaceFileRows(workspaceFilesBody, configFiles, t("workspace.emptyConfig"));
+  renderWorkspaceFileRows(workspacePromptsBody, promptFiles, t("workspace.emptyPrompt"));
+}
+
+function splitWorkspaceFiles(files: WorkspaceFileInfo[]): { configFiles: WorkspaceFileInfo[]; promptFiles: WorkspaceFileInfo[] } {
+  const configFiles: WorkspaceFileInfo[] = [];
+  const promptFiles: WorkspaceFileInfo[] = [];
+  for (const file of files) {
+    if (isWorkspacePromptFile(file)) {
+      promptFiles.push(file);
+      continue;
+    }
+    configFiles.push(file);
+  }
+  return { configFiles, promptFiles };
+}
+
+function renderWorkspaceFileRows(
+  targetBody: HTMLUListElement,
+  files: WorkspaceFileInfo[],
+  emptyText: string,
+): void {
+  targetBody.innerHTML = "";
+  if (files.length === 0) {
+    appendEmptyItem(targetBody, emptyText);
     return;
   }
 
-  state.workspaceFiles.forEach((file) => {
-    const row = document.createElement("tr");
+  files.forEach((file) => {
+    const entry = document.createElement("li");
+    entry.className = "models-provider-card-entry workspace-file-card-entry";
 
-    const pathCol = document.createElement("td");
-    pathCol.className = "mono";
-    pathCol.textContent = file.path;
-
-    const sizeCol = document.createElement("td");
-    sizeCol.textContent = file.size === null ? t("common.none") : String(file.size);
-
-    const actionCol = document.createElement("td");
     const openButton = document.createElement("button");
     openButton.type = "button";
+    openButton.className = "models-provider-card workspace-file-open-card";
     openButton.dataset.workspaceOpen = file.path;
-    openButton.textContent = t("workspace.openFile");
-    openButton.disabled = file.path === state.activeWorkspacePath;
+    if (file.path === state.activeWorkspacePath) {
+      openButton.classList.add("is-selected");
+    }
+    openButton.setAttribute("aria-pressed", String(file.path === state.activeWorkspacePath));
+
+    const pathTitle = document.createElement("span");
+    pathTitle.className = "models-provider-card-title mono workspace-file-card-path";
+    pathTitle.textContent = file.path;
+
+    const summaryMeta = document.createElement("span");
+    summaryMeta.className = "models-provider-card-meta";
+    summaryMeta.textContent = resolveWorkspaceFileSummary(file);
+
+    const sizeMeta = document.createElement("span");
+    sizeMeta.className = "models-provider-card-meta";
+    sizeMeta.textContent = `${t("workspace.size")}: ${file.size === null ? t("common.none") : String(file.size)}`;
+
+    openButton.append(pathTitle, summaryMeta, sizeMeta);
 
     const deleteButton = document.createElement("button");
     deleteButton.type = "button";
-    deleteButton.className = "secondary-btn";
+    const deleteLabel = t("workspace.deleteFile");
+    deleteButton.className = "models-provider-card-delete chat-delete-btn workspace-file-card-delete";
     deleteButton.dataset.workspaceDelete = file.path;
-    deleteButton.textContent = t("workspace.deleteFile");
+    deleteButton.setAttribute("aria-label", deleteLabel);
+    deleteButton.title = deleteLabel;
+    deleteButton.innerHTML = TRASH_ICON_SVG;
     deleteButton.disabled = file.kind !== "skill";
 
-    actionCol.append(openButton, document.createTextNode(" "), deleteButton);
-    row.append(pathCol, sizeCol, actionCol);
-    workspaceFilesBody.appendChild(row);
+    entry.append(openButton, deleteButton);
+    targetBody.appendChild(entry);
   });
+}
+
+function resolveWorkspaceFileSummary(file: WorkspaceFileInfo): string {
+  const path = normalizeWorkspacePathKey(file.path);
+  if (path === "config/envs.json") {
+    return t("workspace.briefEnvs");
+  }
+  if (path === "config/channels.json") {
+    return t("workspace.briefChannels");
+  }
+  if (path === "config/models.json") {
+    return t("workspace.briefModels");
+  }
+  if (path === "config/active-llm.json") {
+    return t("workspace.briefActiveLLM");
+  }
+  if (file.kind === "skill") {
+    return t("workspace.briefSkill");
+  }
+  if (path.startsWith("docs/ai/") || path.startsWith("prompts/") || path.startsWith("prompt/")) {
+    return t("workspace.briefAITools");
+  }
+  return t("workspace.briefGeneric");
+}
+
+function isWorkspacePromptFile(file: WorkspaceFileInfo): boolean {
+  const path = file.path.trim().toLowerCase();
+  if (file.kind === "skill") {
+    return true;
+  }
+  if (path.startsWith("docs/ai/") && (path.endsWith(".md") || path.endsWith(".markdown"))) {
+    return true;
+  }
+  return path.startsWith("prompts/") || path.startsWith("prompt/");
 }
 
 function renderWorkspaceEditor(): void {
@@ -3301,8 +4659,7 @@ async function openWorkspaceFile(path: string, options: { silent?: boolean } = {
     const prepared = prepareWorkspaceEditorPayload(payload);
     state.activeWorkspaceContent = prepared.content;
     state.activeWorkspaceMode = prepared.mode;
-    renderWorkspaceFiles();
-    renderWorkspaceEditor();
+    renderWorkspacePanel();
     setWorkspaceEditorModalOpen(true);
     if (!options.silent) {
       setStatus(t("status.workspaceFileLoaded", { path }), "info");
@@ -3338,6 +4695,9 @@ async function saveWorkspaceFile(): Promise<void> {
     state.activeWorkspaceContent = prepared.content;
     state.activeWorkspaceMode = prepared.mode;
     await refreshWorkspace({ silent: true });
+    if (isSystemPromptWorkspacePath(path)) {
+      invalidateSystemPromptTokensCacheAndReload();
+    }
     setStatus(t("status.workspaceFileSaved", { path }), "info");
   } catch (error) {
     setStatus(asWorkspaceErrorMessage(error), "error");
@@ -3546,6 +4906,78 @@ function createWorkspaceSkillTemplate(path: string): Record<string, unknown> {
   };
 }
 
+function initCronWorkflowEditor(): void {
+  cronWorkflowEditor = new CronWorkflowCanvas({
+    viewport: cronWorkflowViewport,
+    canvas: cronWorkflowCanvas,
+    edgesLayer: cronWorkflowEdges,
+    nodesLayer: cronWorkflowNodes,
+    nodeEditor: cronWorkflowNodeEditor,
+    zoomLabel: cronWorkflowZoom,
+    onStatus: (message, tone) => {
+      setStatus(message, tone);
+    },
+  });
+}
+
+function syncCronTaskModeUI(): void {
+  const mode: "text" | "workflow" = cronTaskTypeSelect.value === "text" ? "text" : "workflow";
+  state.cronDraftTaskType = mode;
+  if (mode !== "workflow" && isCronWorkflowFullscreenActive()) {
+    void exitCronWorkflowFullscreen();
+  }
+  cronTextSection.classList.toggle("is-hidden", mode !== "text");
+  cronWorkflowSection.classList.toggle("is-hidden", mode !== "workflow");
+  cronTextSection.setAttribute("aria-hidden", String(mode !== "text"));
+  cronWorkflowSection.setAttribute("aria-hidden", String(mode !== "workflow"));
+  refreshCronModalTitles();
+  syncCustomSelect(cronTaskTypeSelect);
+}
+
+function refreshCronModalTitles(): void {
+  const createMode = state.cronModal.mode === "create";
+  const workflowMode = state.cronDraftTaskType === "workflow";
+  const titleKey = createMode
+    ? (workflowMode ? "cron.createWorkflowJob" : "cron.createTextJob")
+    : (workflowMode ? "cron.updateWorkflowJob" : "cron.updateTextJob");
+  const submitKey = createMode ? "cron.submitCreate" : "cron.submitUpdate";
+  cronCreateModalTitle.textContent = t(titleKey);
+  cronSubmitButton.textContent = t(submitKey);
+}
+
+function renderCronExecutionDetails(stateValue: CronJobState | undefined): void {
+  cronWorkflowExecutionList.innerHTML = "";
+  const execution = stateValue?.last_execution;
+  if (!execution || !Array.isArray(execution.nodes) || execution.nodes.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "hint";
+    empty.textContent = t("cron.executionEmpty");
+    cronWorkflowExecutionList.appendChild(empty);
+    return;
+  }
+
+  execution.nodes.forEach((item) => {
+    const row = document.createElement("li");
+    row.className = "cron-execution-item";
+    row.dataset.status = item.status;
+    const summary = document.createElement("div");
+    summary.className = "cron-execution-summary";
+    summary.textContent = t("cron.executionSummary", {
+      nodeId: item.node_id,
+      nodeType: formatCronWorkflowNodeType(item.node_type),
+      status: formatCronWorkflowNodeStatus(item.status),
+    });
+    row.appendChild(summary);
+    if (item.error && item.error.trim() !== "") {
+      const err = document.createElement("div");
+      err.className = "cron-execution-error";
+      err.textContent = item.error;
+      row.appendChild(err);
+    }
+    cronWorkflowExecutionList.appendChild(row);
+  });
+}
+
 function syncCronDispatchHint(): void {
   cronDispatchHint.textContent = t("workspace.dispatchHint", {
     userId: state.userId,
@@ -3566,6 +4998,8 @@ function openCronEditModal(jobID: string): void {
     return;
   }
 
+  state.cronDraftTaskType = job.task_type === "text" ? "text" : "workflow";
+  cronTaskTypeSelect.value = state.cronDraftTaskType;
   setCronModalMode("edit", jobID);
 
   cronIDInput.value = job.id;
@@ -3575,9 +5009,20 @@ function openCronEditModal(jobID: string): void {
   cronMaxConcurrencyInput.value = String(job.runtime.max_concurrency ?? 1);
   cronTimeoutInput.value = String(job.runtime.timeout_seconds ?? 30);
   cronMisfireInput.value = String(job.runtime.misfire_grace_seconds ?? 0);
-  cronEnabledInput.checked = job.enabled;
-  cronTextInput.value = job.text ?? "";
+  if (state.cronDraftTaskType === "text") {
+    cronTextInput.value = job.text ?? "";
+  } else {
+    const loadedWorkflow = job.workflow ?? createDefaultCronWorkflow();
+    const issue = validateCronWorkflowSpec(loadedWorkflow);
+    if (issue) {
+      setStatus(t("error.cronWorkflowInvalid", { reason: issue }), "error");
+      cronWorkflowEditor?.setWorkflow(createDefaultCronWorkflow());
+    } else {
+      cronWorkflowEditor?.setWorkflow(loadedWorkflow);
+    }
+  }
 
+  renderCronExecutionDetails(state.cronStates[jobID]);
   syncCronDispatchHint();
   setCronCreateModalOpen(true);
 }
@@ -3612,6 +5057,9 @@ async function refreshCronJobs(): Promise<void> {
     state.cronStates = stateMap;
     state.tabLoaded.cron = true;
     renderCronJobs();
+    if (state.cronModal.mode === "edit") {
+      renderCronExecutionDetails(state.cronStates[state.cronModal.editingJobID]);
+    }
     setStatus(t("status.cronJobsLoaded", { count: jobs.length }), "info");
   } catch (error) {
     setStatus(asErrorMessage(error), "error");
@@ -3621,43 +5069,58 @@ async function refreshCronJobs(): Promise<void> {
 function renderCronJobs(): void {
   cronJobsBody.innerHTML = "";
   if (state.cronJobs.length === 0) {
-    const row = document.createElement("tr");
-    const col = document.createElement("td");
-    col.colSpan = 6;
-    col.className = "empty-cell";
-    col.textContent = t("cron.empty");
-    row.appendChild(col);
-    cronJobsBody.appendChild(row);
+    const entry = document.createElement("li");
+    entry.className = "cron-job-card-entry";
+    const card = document.createElement("article");
+    card.className = "cron-job-card cron-job-card-empty";
+    card.textContent = t("cron.empty");
+    entry.appendChild(card);
+    cronJobsBody.appendChild(entry);
     return;
   }
 
   state.cronJobs.forEach((job) => {
-    const row = document.createElement("tr");
+    const entry = document.createElement("li");
+    entry.className = "cron-job-card-entry";
+
+    const card = document.createElement("article");
+    card.className = "cron-job-card";
+
     const jobState = state.cronStates[job.id];
     const nextRun = jobState?.next_run_at;
+    const statusText = formatCronStatus(jobState);
 
-    const idCol = document.createElement("td");
-    idCol.className = "mono";
-    idCol.textContent = job.id;
+    const head = document.createElement("div");
+    head.className = "cron-job-card-head";
 
-    const nameCol = document.createElement("td");
-    nameCol.textContent = job.name;
+    const title = document.createElement("h4");
+    title.className = "cron-job-card-title";
+    title.textContent = job.name.trim() === "" ? job.id : job.name;
 
-    const enabledCol = document.createElement("td");
-    enabledCol.textContent = job.enabled ? t("common.yes") : t("common.no");
+    const enabled = document.createElement("label");
+    enabled.className = "cron-job-card-enabled";
+    const enabledLabel = document.createElement("span");
+    enabledLabel.textContent = t("cron.enabled");
+    const enabledToggle = document.createElement("input");
+    enabledToggle.type = "checkbox";
+    enabledToggle.className = "cron-enabled-toggle-input";
+    enabledToggle.checked = job.enabled;
+    enabledToggle.dataset.cronToggleEnabled = job.id;
+    enabledToggle.setAttribute("aria-label", `${t("cron.enabled")} ${job.id}`);
+    enabled.append(enabledLabel, enabledToggle);
+    head.append(title, enabled);
 
-    const nextCol = document.createElement("td");
-    nextCol.textContent = nextRun ? compactTime(nextRun) : t("common.none");
+    const metaList = document.createElement("ul");
+    metaList.className = "detail-list cron-job-card-meta-list";
+    metaList.append(
+      createCronJobCardMetaItem(t("cron.id"), job.id, { mono: true }),
+      createCronJobCardMetaItem(t("cron.type"), job.task_type),
+      createCronJobCardMetaItem(t("cron.nextRun"), nextRun ? compactTime(nextRun) : t("common.none")),
+      createCronJobCardMetaItem(t("cron.status"), statusText, { title: jobState?.last_error }),
+    );
 
-    const statusCol = document.createElement("td");
-    statusCol.textContent = formatCronStatus(jobState);
-    if (jobState?.last_error) {
-      statusCol.title = jobState.last_error;
-    }
-
-    const actionCol = document.createElement("td");
     const actions = document.createElement("div");
-    actions.className = "actions-row";
+    actions.className = "actions-row cron-job-card-actions";
 
     const runBtn = document.createElement("button");
     runBtn.type = "button";
@@ -3676,13 +5139,43 @@ function renderCronJobs(): void {
     deleteBtn.className = "danger-btn";
     deleteBtn.dataset.cronDelete = job.id;
     deleteBtn.textContent = t("cron.delete");
+    if (isDefaultCronJob(job)) {
+      deleteBtn.disabled = true;
+      deleteBtn.title = t("cron.deleteDisabledDefault");
+    }
 
     actions.append(runBtn, editBtn, deleteBtn);
-    actionCol.appendChild(actions);
 
-    row.append(idCol, nameCol, enabledCol, nextCol, statusCol, actionCol);
-    cronJobsBody.appendChild(row);
+    card.append(head, metaList, actions);
+    entry.appendChild(card);
+    cronJobsBody.appendChild(entry);
   });
+}
+
+function createCronJobCardMetaItem(
+  label: string,
+  value: string,
+  options: { mono?: boolean; title?: string } = {},
+): HTMLLIElement {
+  const row = document.createElement("li");
+  row.className = "cron-job-card-meta-row";
+
+  const key = document.createElement("span");
+  key.className = "cron-job-card-meta-key";
+  key.textContent = label;
+
+  const valueSpan = document.createElement("span");
+  valueSpan.className = "cron-job-card-meta-value";
+  if (options.mono) {
+    valueSpan.classList.add("mono");
+  }
+  valueSpan.textContent = value;
+  if (options.title) {
+    valueSpan.title = options.title;
+  }
+
+  row.append(key, valueSpan);
+  return row;
 }
 
 function formatCronStatus(stateValue: CronJobState | undefined): string {
@@ -3708,6 +5201,40 @@ function formatCronStatus(stateValue: CronJobState | undefined): string {
   return stateValue.last_status;
 }
 
+function formatCronWorkflowNodeType(value: CronWorkflowNodeExecution["node_type"]): string {
+  if (value === "text_event") {
+    return t("cron.nodeTypeTextEvent");
+  }
+  if (value === "delay") {
+    return t("cron.nodeTypeDelay");
+  }
+  if (value === "if_event") {
+    return t("cron.nodeTypeIfEvent");
+  }
+  return value;
+}
+
+function formatCronWorkflowNodeStatus(value: CronWorkflowNodeExecution["status"]): string {
+  if (value === "succeeded") {
+    return t("cron.statusSucceeded");
+  }
+  if (value === "failed") {
+    return t("cron.statusFailed");
+  }
+  if (value === "skipped") {
+    return t("cron.statusSkipped");
+  }
+  return value;
+}
+
+function isDefaultCronJob(job: CronJobSpec): boolean {
+  if (job.id === DEFAULT_CRON_JOB_ID) {
+    return true;
+  }
+  const marker = job.meta?.[CRON_META_SYSTEM_DEFAULT];
+  return marker === true || marker === "true";
+}
+
 async function saveCronJob(): Promise<boolean> {
   syncControlState();
 
@@ -3716,6 +5243,8 @@ async function saveCronJob(): Promise<boolean> {
   const intervalText = cronIntervalInput.value.trim();
   const sessionID = cronSessionIDInput.value.trim();
   const text = cronTextInput.value.trim();
+  const taskType: "text" | "workflow" = cronTaskTypeSelect.value === "text" ? "text" : "workflow";
+  state.cronDraftTaskType = taskType;
 
   if (id === "" || name === "") {
     setStatus(t("error.cronIdNameRequired"), "error");
@@ -3729,9 +5258,23 @@ async function saveCronJob(): Promise<boolean> {
     setStatus(t("error.cronSessionRequired"), "error");
     return false;
   }
-  if (text === "") {
+  if (taskType === "text" && text === "") {
     setStatus(t("error.cronTextRequired"), "error");
     return false;
+  }
+
+  let workflowPayload: CronWorkflowSpec | undefined;
+  if (taskType === "workflow") {
+    if (!cronWorkflowEditor) {
+      setStatus(t("error.cronWorkflowEditorMissing"), "error");
+      return false;
+    }
+    workflowPayload = cronWorkflowEditor.getWorkflow();
+    const issue = validateCronWorkflowSpec(workflowPayload);
+    if (issue) {
+      setStatus(t("error.cronWorkflowInvalid", { reason: issue }), "error");
+      return false;
+    }
   }
 
   const maxConcurrency = parseIntegerInput(cronMaxConcurrencyInput.value, 1, 1);
@@ -3743,14 +5286,15 @@ async function saveCronJob(): Promise<boolean> {
   const payload: CronJobSpec = {
     id,
     name,
-    enabled: cronEnabledInput.checked,
+    enabled: existingJob?.enabled ?? true,
     schedule: {
       type: existingJob?.schedule.type ?? "interval",
       cron: intervalText,
       timezone: existingJob?.schedule.timezone ?? "",
     },
-    task_type: existingJob?.task_type ?? "text",
-    text,
+    task_type: taskType,
+    text: taskType === "text" ? text : undefined,
+    workflow: taskType === "workflow" ? workflowPayload : undefined,
     dispatch: {
       type: existingJob?.dispatch.type ?? "channel",
       channel: state.channel,
@@ -3782,7 +5326,61 @@ async function saveCronJob(): Promise<boolean> {
       });
     }
     await refreshCronJobs();
+    if (!editing) {
+      setCronModalMode("edit", id);
+    }
+    renderCronExecutionDetails(state.cronStates[id]);
     setStatus(t(editing ? "status.cronUpdated" : "status.cronCreated", { jobId: id }), "info");
+    return true;
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+    return false;
+  }
+}
+
+async function updateCronJobEnabled(jobID: string, enabled: boolean): Promise<boolean> {
+  const existingJob = state.cronJobs.find((job) => job.id === jobID);
+  if (!existingJob) {
+    setStatus(t("error.cronJobNotFound", { jobId: jobID }), "error");
+    return false;
+  }
+  const payload: CronJobSpec = {
+    ...existingJob,
+    enabled,
+    schedule: {
+      type: existingJob.schedule.type ?? "interval",
+      cron: existingJob.schedule.cron ?? "",
+      timezone: existingJob.schedule.timezone ?? "",
+    },
+    dispatch: {
+      type: existingJob.dispatch.type ?? "channel",
+      channel: existingJob.dispatch.channel ?? state.channel,
+      target: {
+        user_id: existingJob.dispatch.target.user_id ?? state.userId,
+        session_id: existingJob.dispatch.target.session_id ?? "",
+      },
+      mode: existingJob.dispatch.mode ?? "",
+      meta: existingJob.dispatch.meta ?? {},
+    },
+    runtime: {
+      max_concurrency: existingJob.runtime.max_concurrency ?? 1,
+      timeout_seconds: existingJob.runtime.timeout_seconds ?? 30,
+      misfire_grace_seconds: existingJob.runtime.misfire_grace_seconds ?? 0,
+    },
+    meta: existingJob.meta ?? {},
+  };
+
+  if (payload.dispatch.target.session_id.trim() === "") {
+    setStatus(t("error.cronSessionRequired"), "error");
+    return false;
+  }
+
+  try {
+    await requestJSON<CronJobSpec>(`/cron/jobs/${encodeURIComponent(jobID)}`, {
+      method: "PUT",
+      body: payload,
+    });
+    await refreshCronJobs();
     return true;
   } catch (error) {
     setStatus(asErrorMessage(error), "error");
@@ -3792,6 +5390,11 @@ async function saveCronJob(): Promise<boolean> {
 
 async function deleteCronJob(jobID: string): Promise<void> {
   syncControlState();
+  const job = state.cronJobs.find((item) => item.id === jobID);
+  if ((job && isDefaultCronJob(job)) || jobID === DEFAULT_CRON_JOB_ID) {
+    setStatus(t("error.cronDeleteDefaultProtected", { jobId: jobID }), "error");
+    return;
+  }
   if (!window.confirm(t("cron.deleteConfirm", { jobId: jobID }))) {
     return;
   }
@@ -3801,6 +5404,11 @@ async function deleteCronJob(jobID: string): Promise<void> {
       method: "DELETE",
     });
     await refreshCronJobs();
+    if (state.cronModal.mode === "edit" && state.cronModal.editingJobID === jobID) {
+      setCronCreateModalOpen(false);
+      setCronModalMode("create");
+      renderCronExecutionDetails(undefined);
+    }
     const messageKey = result.deleted ? "status.cronDeleted" : "status.cronDeleteSkipped";
     setStatus(t(messageKey, { jobId: jobID }), "info");
   } catch (error) {
@@ -3920,18 +5528,64 @@ function normalizeProviders(providers: ProviderInfo[]): ProviderInfo[] {
     display_name: provider.display_name?.trim() || provider.name?.trim() || provider.id,
     openai_compatible: provider.openai_compatible ?? false,
     models: Array.isArray(provider.models) ? provider.models : [],
+    headers: normalizeProviderHeadersMap(provider.headers),
+    timeout_ms: normalizeProviderTimeoutMS(provider.timeout_ms),
+    model_aliases: normalizeProviderAliasMap(provider.model_aliases),
     enabled: provider.enabled ?? true,
     current_api_key: provider.current_api_key ?? "",
     current_base_url: provider.current_base_url ?? "",
   }));
 }
 
-function formatProviderLabel(provider: ProviderInfo): string {
-  const base = provider.display_name === provider.id ? provider.id : `${provider.display_name} (${provider.id})`;
-  if (provider.openai_compatible) {
-    return `${base} (${t("models.compatible")})`;
+function normalizeProviderHeadersMap(raw: unknown): Record<string, string> | undefined {
+  const parsed = toRecord(raw);
+  if (!parsed) {
+    return undefined;
   }
-  return base;
+  const headers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    const headerKey = key.trim();
+    const headerValue = typeof value === "string" ? value.trim() : "";
+    if (headerKey === "" || headerValue === "") {
+      continue;
+    }
+    headers[headerKey] = headerValue;
+  }
+  if (Object.keys(headers).length === 0) {
+    return undefined;
+  }
+  return headers;
+}
+
+function normalizeProviderTimeoutMS(raw: unknown): number | undefined {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) {
+    return undefined;
+  }
+  return Math.trunc(raw);
+}
+
+function normalizeProviderAliasMap(raw: unknown): Record<string, string> | undefined {
+  const parsed = toRecord(raw);
+  if (!parsed) {
+    return undefined;
+  }
+  const aliases: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    const alias = key.trim();
+    const target = typeof value === "string" ? value.trim() : "";
+    if (alias === "" || target === "") {
+      continue;
+    }
+    aliases[alias] = target;
+  }
+  if (Object.keys(aliases).length === 0) {
+    return undefined;
+  }
+  return aliases;
+}
+
+function formatProviderLabel(provider: ProviderInfo): string {
+  return provider.display_name?.trim() || provider.name?.trim() || provider.id;
 }
 
 function normalizeDefaults(defaults: Record<string, string>, providers: ProviderInfo[]): Record<string, string> {
@@ -4046,6 +5700,23 @@ function setStatus(message: string, tone: Tone = "neutral"): void {
   if (tone === "error" || tone === "info") {
     statusLine.classList.add(tone);
   }
+  const payload = {
+    tone,
+    message,
+    at: new Date().toISOString(),
+  };
+  if (tone === "error") {
+    console.error("[NextAI][status]", payload);
+    return;
+  }
+  console.log("[NextAI][status]", payload);
+}
+
+function logComposerStatusToConsole(): void {
+  console.log("[NextAI][chat-composer-status]", {
+    statusLocal: t("chat.statusLocal"),
+    statusFullAccess: t("chat.statusFullAccess"),
+  });
 }
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -4075,15 +5746,39 @@ function buildToolCallNoticeFromRaw(raw: string): ViewToolCallNotice | null {
     return null;
   }
   let summary = t("chat.toolCallNotice", { target: "tool" });
+  let detail = normalized;
+  let toolName = "";
+  let outputReady = true;
+  let step: number | undefined;
   try {
     const payload = JSON.parse(normalized) as AgentStreamEvent;
-    summary = formatToolCallSummary(payload.tool_call);
+    step = parsePositiveInteger(payload.step);
+    if (payload.type === "tool_call") {
+      summary = formatToolCallSummary(payload.tool_call);
+      toolName = normalizeToolName(payload.tool_call?.name);
+      if (toolName === "shell") {
+        detail = t("chat.toolCallOutputUnavailable");
+      }
+      outputReady = toolName === "shell";
+    } else if (payload.type === "tool_result") {
+      toolName = normalizeToolName(payload.tool_result?.name);
+      if (toolName === "shell") {
+        summary = "bash";
+        detail = formatToolResultOutput(payload.tool_result);
+      }
+      outputReady = true;
+    } else {
+      summary = formatToolCallSummary(payload.tool_call);
+    }
   } catch {
     // ignore invalid raw payload and keep fallback summary
   }
   return {
     summary,
-    raw: normalized,
+    raw: detail,
+    step,
+    toolName: toolName === "" ? undefined : toolName,
+    outputReady,
   };
 }
 
@@ -4227,16 +5922,27 @@ function isTabKey(value: string | undefined): value is TabKey {
 }
 
 function newSessionID(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return `session-${crypto.randomUUID()}`;
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const length = 6;
+  const bytes = new Uint8Array(length);
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
   }
-  return `session-${Date.now()}`;
+  let id = "";
+  for (const value of bytes) {
+    id += alphabet[value % alphabet.length];
+  }
+  return id;
 }
 
-function mustElement<T extends HTMLElement>(id: string): T {
+function mustElement<T extends Element>(id: string): T {
   const element = document.getElementById(id);
   if (!element) {
     throw new Error(t("error.missingElement", { id }));
   }
-  return element as T;
+  return element as unknown as T;
 }

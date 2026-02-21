@@ -5,7 +5,7 @@ Current scope:
   - Session list (`GET /chats`)
   - Chat history (`GET /chats/{chat_id}`)
   - Streaming send (`POST /agent/process` with SSE parsing)
-  - Tool call raw payload in chat message (`tool_call` -> 原始 SSE JSON 文本)
+  - Shell tool call output in chat message (`tool_result.summary` -> 命令执行输出摘要)
 - Console settings -> Models section
   - Providers catalog (`GET /models/catalog`, fallback to `GET /models`)
   - Active model bootstrap fallback (`PUT /models/active` when catalog `active_llm` is empty)

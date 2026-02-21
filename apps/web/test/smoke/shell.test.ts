@@ -14,6 +14,7 @@ describe("web shell smoke", () => {
     expect(html).toContain('id="composer"');
     expect(html).toContain('id="message-input"');
     expect(html).toContain('id="send-btn"');
+    expect(html).toContain('id="composer-token-estimate"');
     expect(html).toContain('id="chat-search-toggle"');
     expect(html).toContain('id="search-modal"');
     expect(html).toContain('id="search-chat-input"');
@@ -31,5 +32,16 @@ describe("web shell smoke", () => {
     expect(html).toContain('id="workspace-file-content"');
     expect(html).toContain('id="workspace-import-form"');
     expect(html).toContain('id="panel-cron"');
+    expect(html).toContain('id="chat-cron-toggle"');
+    expect(html).toContain('id="cron-chat-toggle"');
+    expect(html).toContain('id="cron-task-type"');
+    expect(html).toContain('id="cron-workflow-viewport"');
+    expect(html).toContain('id="cron-workflow-canvas"');
+    expect(html).toContain('id="cron-workflow-edges"');
+    expect(html).toContain('id="cron-workflow-nodes"');
+    expect(html).toContain('id="cron-reset-workflow"');
+    expect(html).toContain('id="cron-workflow-fullscreen-btn"');
+    expect(html).toContain('id="cron-workflow-node-editor"');
+    expect(html).toContain('id="cron-workflow-execution-list"');
   });
 });
