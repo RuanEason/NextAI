@@ -1386,8 +1386,9 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
       return text.includes("QQ inbound");
     }, 4000);
 
-    const searchTabButton = document.querySelector<HTMLButtonElement>('button[data-tab="search"]');
-    searchTabButton?.click();
+    const searchToggleButton = document.getElementById("chat-search-toggle") as HTMLButtonElement | null;
+    expect(searchToggleButton).not.toBeNull();
+    searchToggleButton?.click();
 
     await waitFor(() => {
       const text = document.querySelector<HTMLElement>("#search-chat-results")?.textContent ?? "";
@@ -1584,9 +1585,9 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
 
     await waitFor(() => openedChatID !== "", 4000);
 
-    const searchTabButton = document.querySelector<HTMLButtonElement>('button[data-tab="search"]');
-    expect(searchTabButton).not.toBeNull();
-    searchTabButton?.click();
+    const searchToggleButton = document.getElementById("chat-search-toggle") as HTMLButtonElement | null;
+    expect(searchToggleButton).not.toBeNull();
+    searchToggleButton?.click();
 
     const searchInput = document.getElementById("search-chat-input") as HTMLInputElement;
     searchInput.value = "job-demo";
@@ -1673,9 +1674,13 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
 
     await import("../../src/main.ts");
 
-    const channelsTabButton = document.querySelector<HTMLButtonElement>('button[data-tab="channels"]');
-    expect(channelsTabButton).not.toBeNull();
-    channelsTabButton?.click();
+    const settingsToggleButton = document.getElementById("settings-toggle") as HTMLButtonElement;
+    expect(settingsToggleButton).not.toBeNull();
+    settingsToggleButton?.click();
+
+    const channelsSectionButton = document.querySelector<HTMLButtonElement>('button[data-settings-section="channels"]');
+    expect(channelsSectionButton).not.toBeNull();
+    channelsSectionButton?.click();
 
     await waitFor(() => qqConfigLoaded, 4000);
     expect(document.getElementById("channels-level1-view")?.hasAttribute("hidden")).toBe(false);
@@ -1757,9 +1762,13 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
 
     await import("../../src/main.ts");
 
-    const workspaceTabButton = document.querySelector<HTMLButtonElement>('button[data-tab="workspace"]');
-    expect(workspaceTabButton).not.toBeNull();
-    workspaceTabButton?.click();
+    const settingsToggleButton = document.getElementById("settings-toggle") as HTMLButtonElement | null;
+    expect(settingsToggleButton).not.toBeNull();
+    settingsToggleButton?.click();
+
+    const workspaceSectionButton = document.querySelector<HTMLButtonElement>('button[data-settings-section="workspace"]');
+    expect(workspaceSectionButton).not.toBeNull();
+    workspaceSectionButton?.click();
 
     await waitFor(() => document.querySelector<HTMLButtonElement>(`button[data-workspace-open="${filePath}"]`) !== null, 4000);
 
