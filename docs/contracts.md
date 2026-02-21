@@ -107,3 +107,8 @@
 - Default chat baseline fields: `session_id=session-default`, `user_id=demo-user`, `channel=console`.
 - Default chat carries `meta.system_default=true`.
 - `DELETE /chats/{chat_id}` and `POST /chats/batch-delete` reject deleting `chat-default` with `400 default_chat_protected`.
+
+## Cron Default Job Rule
+- Gateway always keeps one protected default cron job in state (`id=cron-default`).
+- Default cron job baseline fields: `name=你好文本任务`, `task_type=text`, `text=你好`, `enabled=false`.
+- `DELETE /cron/jobs/{job_id}` rejects deleting `cron-default` with `400 default_cron_protected`.

@@ -92,6 +92,7 @@ func defaultState(dataDir string) State {
 		},
 	}
 	ensureDefaultChat(&state)
+	ensureDefaultCronJob(&state)
 	return state
 }
 
@@ -188,6 +189,7 @@ func (s *Store) load() error {
 		}
 	}
 	ensureDefaultChat(&state)
+	ensureDefaultCronJob(&state)
 	s.state = state
 	return nil
 }
@@ -200,6 +202,7 @@ func (s *Store) Save() error {
 
 func (s *Store) saveLocked() error {
 	ensureDefaultChat(&s.state)
+	ensureDefaultCronJob(&s.state)
 	b, err := json.MarshalIndent(s.state, "", "  ")
 	if err != nil {
 		return err
@@ -252,6 +255,123 @@ func ensureDefaultChat(state *State) {
 	if _, ok := state.Histories[domain.DefaultChatID]; !ok {
 		state.Histories[domain.DefaultChatID] = []domain.RuntimeMessage{}
 	}
+}
+
+func ensureDefaultCronJob(state *State) {
+	if state == nil {
+		return
+	}
+	if state.CronJobs == nil {
+		state.CronJobs = map[string]domain.CronJobSpec{}
+	}
+	if state.CronStates == nil {
+		state.CronStates = map[string]domain.CronJobState{}
+	}
+
+	defaultJob := domain.CronJobSpec{
+		ID:      domain.DefaultCronJobID,
+		Name:    domain.DefaultCronJobName,
+		Enabled: false,
+		Schedule: domain.CronScheduleSpec{
+			Type: "interval",
+			Cron: domain.DefaultCronJobInterval,
+		},
+		TaskType: "text",
+		Text:     domain.DefaultCronJobText,
+		Dispatch: domain.CronDispatchSpec{
+			Type:    "channel",
+			Channel: domain.DefaultChatChannel,
+			Target: domain.CronDispatchTarget{
+				UserID:    domain.DefaultChatUserID,
+				SessionID: domain.DefaultChatSessionID,
+			},
+			Mode: "",
+			Meta: map[string]interface{}{},
+		},
+		Runtime: domain.CronRuntimeSpec{
+			MaxConcurrency:      1,
+			TimeoutSeconds:      30,
+			MisfireGraceSeconds: 0,
+		},
+		Meta: map[string]interface{}{
+			domain.CronMetaSystemDefault: true,
+		},
+	}
+
+	current, ok := state.CronJobs[domain.DefaultCronJobID]
+	if !ok {
+		state.CronJobs[domain.DefaultCronJobID] = defaultJob
+		return
+	}
+
+	current.ID = domain.DefaultCronJobID
+	if strings.TrimSpace(current.Name) == "" {
+		current.Name = domain.DefaultCronJobName
+	}
+
+	scheduleType := strings.ToLower(strings.TrimSpace(current.Schedule.Type))
+	if scheduleType != "interval" && scheduleType != "cron" {
+		scheduleType = "interval"
+	}
+	current.Schedule.Type = scheduleType
+	if strings.TrimSpace(current.Schedule.Cron) == "" {
+		current.Schedule.Cron = domain.DefaultCronJobInterval
+	}
+
+	if strings.TrimSpace(current.Dispatch.Type) == "" {
+		current.Dispatch.Type = "channel"
+	}
+	if strings.TrimSpace(current.Dispatch.Channel) == "" {
+		current.Dispatch.Channel = domain.DefaultChatChannel
+	}
+	if strings.TrimSpace(current.Dispatch.Target.UserID) == "" {
+		current.Dispatch.Target.UserID = domain.DefaultChatUserID
+	}
+	if strings.TrimSpace(current.Dispatch.Target.SessionID) == "" {
+		current.Dispatch.Target.SessionID = domain.DefaultChatSessionID
+	}
+	if current.Dispatch.Meta == nil {
+		current.Dispatch.Meta = map[string]interface{}{}
+	}
+
+	if current.Runtime.MaxConcurrency <= 0 {
+		current.Runtime.MaxConcurrency = 1
+	}
+	if current.Runtime.TimeoutSeconds <= 0 {
+		current.Runtime.TimeoutSeconds = 30
+	}
+	if current.Runtime.MisfireGraceSeconds < 0 {
+		current.Runtime.MisfireGraceSeconds = 0
+	}
+
+	taskType := strings.ToLower(strings.TrimSpace(current.TaskType))
+	switch taskType {
+	case "workflow":
+		current.TaskType = "workflow"
+		if current.Workflow == nil {
+			current.TaskType = "text"
+			current.Text = domain.DefaultCronJobText
+		}
+	case "text":
+		current.TaskType = "text"
+		if strings.TrimSpace(current.Text) == "" {
+			current.Text = domain.DefaultCronJobText
+		}
+		current.Workflow = nil
+	default:
+		current.TaskType = "text"
+		current.Workflow = nil
+		if strings.TrimSpace(current.Text) == "" {
+			current.Text = domain.DefaultCronJobText
+		}
+	}
+
+	if current.Meta == nil {
+		current.Meta = map[string]interface{}{}
+	}
+	current.Meta[domain.CronMetaSystemDefault] = true
+
+	state.CronJobs[domain.DefaultCronJobID] = current
 }
 
 func (s *Store) Read(fn func(state *State)) {
