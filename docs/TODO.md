@@ -1,6 +1,6 @@
 ﻿# NextAI TODO
 
-更新时间：2026-02-19 09:39:04 +0800
+更新时间：2026-02-21 12:05:00 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`（Windows：`C:\Users\Lenovo\.codex\handoff\latest.md`）。
@@ -24,11 +24,236 @@
 4. 每次任务收尾必须更新本文件（完成项/阻塞/更新时间），并记录本次改动摘要与验证命令。
 
 ## 3. 当前未完成项与阻塞
-- [ ] 阻塞：当前环境未找到交接文件 `/home/ruan/.codex/handoff/latest.md`（Windows 下 `C:\Users\Lenovo\.codex\handoff\latest.md` 也不存在）。
-- [ ] 阻塞：`pnpm -C apps/web test` 当前仍失败 1 项：`test/e2e/web-shell-tool-flow.test.ts` 用例“搜索页支持过滤会话并点击进入会话详情”中 `search-chat-input` 为 `null`。
-- [ ] 阻塞：`cd apps/gateway && go test ./...` 当前失败 1 项：`TestProcessAgentViewOutOfBoundsFallsBackToEmptyFile` 断言仍使用旧文案 `[empty file fallback]`，实际输出已为 `[empty] (fallback from requested [1-100], total=0)`。
+- [ ] 阻塞：`cd apps/gateway && go test ./...` 当前失败 1 项：`TestProcessAgentViewOutOfBoundsFallsBackToEmptyFile` 断言仍使用旧文案 `[empty file fallback]`，实际输出已为 `[empty] (fallback from requested [1-100], total=0)`（2026-02-21 12:02 +0800 复验仍失败）。
 
 ## 4. 最近关键变更（摘要）
+- [x] 2026-02-21 12:05 +0800 工作区分批提交：新分支 `feat/web-gateway-cron-default-guard` 已提交两批代码，`cc9ab5a feat(gateway): protect default cron job lifecycle`、`37e63d5 feat(web): refine chat and cron workflow interactions`。
+- [x] 2026-02-21 12:05 +0800 本次验证：执行 `pnpm --filter @nextai/tests-contract run lint`、`pnpm --filter @nextai/tests-contract run test`、`pnpm -C apps/web test`（44 tests）、`pnpm -C apps/web build` 均通过；执行 `cd apps/gateway && go test ./...` 失败 1 项（既有阻塞 `TestProcessAgentViewOutOfBoundsFallsBackToEmptyFile`）；定向执行 `cd apps/gateway && go test ./internal/repo -run TestLoadEnsuresDefaultCronJob -count=1` 与 `cd apps/gateway && go test ./internal/app -run "TestListCronJobsContainsDefaultCronJob|TestDeleteDefaultCronJobRejected" -count=1` 通过。
+- [x] 2026-02-20 23:01 +0800 Cron 默认任务保护落地：`apps/gateway/internal/domain/models.go` 新增默认 cron 常量（`cron-default`、默认禁用、默认文本“你好”）；`apps/gateway/internal/repo/store.go` 新增 `ensureDefaultCronJob()` 并在 `defaultState/load/saveLocked` 注入默认任务，确保任务列表始终至少保留一个任务。
+- [x] 2026-02-20 23:01 +0800 Cron 删除保护与契约同步：`apps/gateway/internal/app/server.go` 的 `DELETE /cron/jobs/{job_id}` 新增默认任务删除保护，返回 `400 default_cron_protected`；同步更新 `packages/contracts/openapi/openapi.yaml` 与 `docs/contracts.md`（新增 Cron Default Job Rule）。
+- [x] 2026-02-20 23:01 +0800 Web 交互对齐：`apps/web/src/main.ts` 将默认 cron 任务删除按钮禁用并显示提示，删除流程新增前置拦截；`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增默认任务删除受限文案；`apps/web/test/e2e/web-shell-tool-flow.test.ts` 新增“默认 cron 不可删但可切换启用”用例。
+- [x] 2026-02-20 23:01 +0800 回归覆盖补充：`apps/gateway/internal/repo/store_test.go` 新增 `TestLoadEnsuresDefaultCronJob`；`apps/gateway/internal/app/server_test.go` 新增 `TestListCronJobsContainsDefaultCronJob`、`TestDeleteDefaultCronJobRejected`。
+- [x] 2026-02-20 23:01 +0800 本次验证：执行 `pnpm --filter @nextai/tests-contract run lint`、`pnpm --filter @nextai/tests-contract run test`、`pnpm -C apps/web test`（44 tests）、`pnpm -C apps/web build` 均通过；执行 `cd apps/gateway && go test ./...` 失败 1 项（既有阻塞 `TestProcessAgentViewOutOfBoundsFallsBackToEmptyFile`）；定向执行 `cd apps/gateway && go test ./internal/repo -run TestLoadEnsuresDefaultCronJob -count=1` 与 `cd apps/gateway && go test ./internal/app -run "TestListCronJobsContainsDefaultCronJob|TestDeleteDefaultCronJobRejected" -count=1` 通过。
+- [x] 2026-02-20 22:59 +0800 恢复左下角上下文计数可见：`apps/web/src/styles.css` 将 `.composer-meta-row` 从 `display: none` 调整为可见布局（`display: flex`），左下角重新展示 `#composer-token-estimate` 的 `x.xk/y.yk` 上下文占用。
+- [x] 2026-02-20 22:59 +0800 本次验证：执行 `pnpm -C apps/web test`（43 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 22:56 +0800 会话切换无感刷新：`apps/web/src/main.ts` 新增 `syncActiveChatSelections()`，`openChat()` 切换会话时不再整表重建 `chat-list/search-results`，仅更新 active 状态；并为 `openChat` 增加请求序号防抖，避免快速切换导致旧请求回写闪屏。
+- [x] 2026-02-20 22:56 +0800 历史消息切换去闪烁：`apps/web/src/main.ts` 为 `renderMessages()` 增加 `animate` 参数，会话切换与 live refresh 走 `renderMessages({ animate: false })`；`apps/web/src/styles.css` 新增 `.message.no-anim` 禁用入场动画，避免切会话时消息区白闪。
+- [x] 2026-02-20 22:56 +0800 回归覆盖补充：新增 `apps/web/test/e2e/web-chat-switch-no-flicker.test.ts`，校验切换会话时列表按钮 DOM 不重挂载、active 状态正确、历史消息以无动画方式渲染。
+- [x] 2026-02-20 22:56 +0800 本次验证：执行 `pnpm -C apps/web test`（43 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 22:52 +0800 会话随机 ID 缩短到 6 位：`apps/web/src/main.ts` 将 `newSessionID()` 从 `session-UUID/Date.now` 改为固定 6 位小写字母数字随机串，避免会话 ID 过长。
+- [x] 2026-02-20 22:52 +0800 回归覆盖补充：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 在“发送 /shell 命令”用例新增断言，校验请求中的 `session_id` 匹配 `^[a-z0-9]{6}$`。
+- [x] 2026-02-20 22:52 +0800 本次验证：执行 `pnpm -C apps/web test`（42 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 22:51 +0800 下拉选项区去滚动槽残留并铺满：`apps/web/src/styles.css` 将 `options-body` 改为 `scrollbar-gutter: auto` 且移除内边距，`option` 取消圆角并配合 `options-list`/`options-search` 内边距调整，避免隐藏滚动条后出现“奇怪边框/留白”，选中项背景横向填满。
+- [x] 2026-02-20 22:51 +0800 下拉搜索占位精简为“搜索”：`apps/web/src/main.ts` 将自定义下拉搜索框占位从 `search.inputPlaceholder` 改为 `tab.search`，不再展示“输入会话名、Session ID...”长文案。
+- [x] 2026-02-20 22:51 +0800 本次验证：执行 `pnpm -C apps/web test`（42 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 22:47 +0800 Cron「任务类型」下拉移除搜索框：`apps/web/src/index.html` 为 `#cron-task-type` 增加 `data-select-search="off"`；`apps/web/src/main.ts` 自定义下拉增强支持按 `data-select-search` 选择性渲染搜索输入，并兼容无搜索模式的同步/展开高度计算；`apps/web/test/e2e/web-shell-tool-flow.test.ts` 增加断言确保该下拉容器不存在 `.options-search-input`。
+- [x] 2026-02-20 22:47 +0800 本次验证：执行 `pnpm -C apps/web test`（42 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 21:40 +0800 API 连接/显示与语言页样式对齐模型设置编辑卡片：`apps/web/src/index.html` 将 `settings-section-panel="connection"` 与 `settings-section-panel="display"` 从 `controls` 结构改为 `models-level-edit-head + stack-form + provider-basic-grid`，API Base/API Key/Language 均为单列“一行一个输入框/下拉框”，并保留“刷新会话”按钮。
+- [x] 2026-02-20 21:40 +0800 本次验证：执行 `pnpm -C apps/web test`（42 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 21:36 +0800 “添加提供商”启用控件改为左右滑动开关：`apps/web/src/index.html` 将 `#models-provider-enabled-input` 从“checkbox + 启用文案”改为 `provider-enabled-toggle-input` 的 `role="switch"` 结构，视觉与 QQ 渠道启用开关一致。
+- [x] 2026-02-20 21:36 +0800 本次验证：执行 `pnpm -C apps/web test`（42 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 21:34 +0800 输入框左下角“上下文”文案隐藏：`apps/web/src/styles.css` 将 `.composer-meta-row` 设为 `display: none;`，不再在输入框左下角展示 `#composer-token-estimate`。
+- [x] 2026-02-20 21:34 +0800 本次验证：执行 `pnpm -C apps/web test`（42 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 21:02 +0800 编码修复补丁：`apps/web/src/locales/zh-CN.ts` 将 `cron.nodeHandleLinkTo`、`cron.nodeHandleLinkFrom`、`status.composerAttachmentsAdded` 从误写 `?` 占位改为 Unicode 转义中文，避免终端编码回写污染。
+- [x] 2026-02-20 21:02 +0800 本次复验：再次执行 `pnpm -C apps/web test`（42 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 21:00 +0800 修复 Web 中文 locale 编码污染：`apps/web/src/locales/zh-CN.ts` 清理 `U+FFFD` 乱码并移除 UTF-8 BOM；对与 `HEAD` 同键的 91 项回填稳定文案，并补齐新增键中文文案（含 `cron.nodeHandleLinkTo/From`、`workspace.promptCardTitle`、`status.composerAttachmentsAdded`）。
+- [x] 2026-02-20 21:00 +0800 本次验证：执行 `pnpm -C apps/web test`（42 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 20:33 +0800 Cron/Search 区块新增节点的后备文案清理：`apps/web/src/index.html` 将 `?` 占位后备文案替换为可读英文（`Cron Jobs/Chat/Create/Refresh/Search Results` 等），保持 `data-i18n` 键不变。
+- [x] 2026-02-20 20:33 +0800 本次复验：再次执行 `pnpm -C apps/web test`（42 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 20:31 +0800 定时任务列表改为“配置同款卡片”：`apps/web/src/index.html` 将 `#cron-jobs-body` 从表格 `tbody` 改为卡片 `ul`，`apps/web/src/main.ts` 重写 `renderCronJobs()` 为“一任务一卡片”渲染（保留启用开关与 `run/edit/delete` 操作），`apps/web/src/styles.css` 新增 `cron-job-card-*` 样式并在移动端改为单列。
+- [x] 2026-02-20 20:31 +0800 页面结构对齐当前脚本依赖：补齐 `chat-cron-toggle`、composer 附件/模型选择器、channels/workspace 一级/二级卡片容器、cron workflow 编辑区等缺失节点；修复搜索弹窗损坏标签，并在 `apps/web/src/locales/zh-CN.ts` 修正受编码污染的关键文案（`toolCall*Path`、`models.deleteProvider`、`cron.exitFullscreen`、`chat.deleteConfirm` 等）。
+- [x] 2026-02-20 20:31 +0800 本次验证：执行 `pnpm -C apps/web test`（42 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 20:30 +0800 Workspace 配置/提示词二级文件列表改为“模型配置同款卡片”：`apps/web/src/index.html` 将 `workspace-files-body/workspace-prompts-body` 从表格 `tbody` 改为卡片 `ul`；`apps/web/src/main.ts` 重写 `renderWorkspaceFileRows` 为卡片渲染（整卡 `data-workspace-open` 点击即打开拟态编辑弹窗，右上角保留删除图标按钮）；`apps/web/src/styles.css` 新增 workspace 文件卡片条目样式并移除旧表格动作行样式。
+- [x] 2026-02-20 20:30 +0800 阻塞清理：`pnpm -C apps/web test` 当前已恢复全量通过（42 tests），移除“Web e2e 失败 6 项”阻塞记录。
+- [x] 2026-02-20 20:30 +0800 本次验证：执行 `pnpm -C apps/web test` 与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 20:28 +0800 本轮最终验证：`pnpm -C apps/web build` 通过；`pnpm -C apps/web test` 失败 6 项（均为既有 e2e 阻塞，详见“当前未完成项与阻塞”）；定向执行 `pnpm -C apps/web test -- test/e2e/web-active-model-chat-flow.test.ts -t "context tokens|128.0k|context limit denominator|system prompt files"` 通过（4 passed）。
+- [x] 2026-02-20 20:25 +0800 左下角 Token 计数重做为“当前 AI 上下文 used/total”：`apps/web/src/main.ts` 重写 `renderComposerTokenEstimate`，新增 `estimateConversationContextTokens`、`estimateCurrentAIContextTokens`、`resolveActiveModelContextLimitTokens`、`formatTokensK`；新增系统提示 token 缓存加载（`docs/AI/AGENTS.md` + `docs/AI/ai-tools.md`，含 loaded/in-flight 防重与失败降级 0），并在 `openChat`/`startDraftSession`/`sendMessage finally`/`renderComposerModelSelectors`/系统提示文件保存后补齐刷新。
+- [x] 2026-02-20 20:25 +0800 i18n 与 e2e 同步：`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 将 `chat.tokensEstimate` 改为 `{{used}}/{{total}}`；`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增 4 个用例覆盖 context limit 读取、128k 回退、模型切换分母刷新、保存系统提示后 used 变化。
+- [x] 2026-02-20 20:25 +0800 本次验证：`pnpm -C apps/web build` 通过；`pnpm -C apps/web test` 失败（既有阻塞：`missing_element #chat-cron-toggle`、smoke 缺少 `#composer-token-estimate`、unit 中文文案断言不匹配）；定向执行 `pnpm -C apps/web test -- test/e2e/web-active-model-chat-flow.test.ts -t "shows used and total context tokens with active model context limit"` 同样被 `missing_element #chat-cron-toggle` 阻塞。
+- [x] 2026-02-20 20:25 +0800 会话身份配置收敛：`apps/web/src/index.html` 删除设置导航中的 `identity` 分组及其 `user-id/channel` 输入区；`apps/web/src/main.ts` 移除 `userIdInput/channelInput` 依赖，将 `state.userId` 固定为 `DEFAULT_USER_ID`，并保持 `channel=console`；`restoreSettings/syncControlState` 不再读写前端 `userId` 输入。
+- [x] 2026-02-20 20:25 +0800 本次验证：执行 `pnpm -C apps/web build` 通过；执行 `pnpm -C apps/web test` 失败（既有阻塞：`missing_element #chat-cron-toggle`、smoke 缺少 `#composer-token-estimate`）。同时修复本次操作引入的 `apps/web/src/locales/zh-CN.ts` 编码异常，`test/unit/i18n.test.ts` 已恢复通过。
+- [x] 2026-02-20 20:24 +0800 下拉增强支持搜索且滚动条隐藏：`apps/web/src/main.ts` 在自定义下拉新增顶部搜索输入（`options-search-input`）与关键词过滤逻辑（支持键盘上下选择、ESC 关闭），并将滚轮事件代理到选项滚动区域；`apps/web/src/styles.css` 新增搜索框与 `options-body` 样式，隐藏下拉滚动条但保留鼠标滚轮滚动；`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增用例“filters custom select options with the dropdown search input”覆盖筛选路径。
+- [x] 2026-02-20 20:24 +0800 本次验证：执行 `pnpm -C apps/web build` 通过；执行 `pnpm -C apps/web test` 失败（既有阻塞：`missing_element #chat-cron-toggle`、smoke 缺少 `#composer-token-estimate`、unit 中文文案断言不匹配），与当前未完成阻塞一致。
+- [x] 2026-02-20 20:22 +0800 输入框右侧留白与左侧对齐：`apps/web/src/styles.css` 在 `.chat` 增加 `scrollbar-gutter: auto;`，避免全局 `scrollbar-gutter: stable` 在 `overflow: hidden` 聊天容器右侧预留滚动槽，导致输入区右间距视觉偏大。
+- [x] 2026-02-20 20:22 +0800 本次验证：执行 `pnpm -C apps/web test` 失败（既有阻塞：`missing_element #chat-cron-toggle`、smoke 缺少 `#composer-token-estimate`、unit `status.chatNotFound` 中文断言不匹配）；执行 `pnpm -C apps/web build` 通过。
+- [x] 2026-02-20 20:21 +0800 Workflow 节点编辑改为居中拟态弹窗：`apps/web/src/cron-workflow.ts` 将节点编辑器从锚点小浮层改为覆盖式 modal（保留 ESC/关闭按钮，新增点击遮罩关闭）；`apps/web/src/styles.css` 将 `.cron-workflow-node-editor` 改为遮罩层并新增 `.cron-node-editor-modal-panel` 拟态样式。
+- [x] 2026-02-20 20:21 +0800 本次验证：执行 `pnpm -C apps/web build` 通过；执行 `pnpm -C apps/web test` 失败（既有阻塞：`apps/web/src/locales/zh-CN.ts` 被 Vitest/esbuild 报 `Unterminated string literal`，并伴随 `apps/web/src/index.html` smoke 断言缺少 `#composer-token-estimate`）。
+- [x] 2026-02-20 20:17 +0800 Cron 画布右上角缩放百分比下调：`apps/web/src/styles.css` 在 `.cron-workflow-toolbar #cron-workflow-zoom` 增加 `margin-top: 4px;`，将 `100%` 位置向下微调。
+- [x] 2026-02-20 20:17 +0800 本次验证：执行 `pnpm -C apps/web test`（37 tests）通过；执行 `pnpm -C apps/web build` 首次因 `dist/locales/*.js` 被占用失败，重试后通过。
+- [x] 2026-02-20 20:11 +0800 QQ 渠道保存后立即返回卡片首页：`apps/web/src/main.ts` 在 `saveQQChannelConfig()` 成功分支新增 `setChannelsSettingsLevel("list")`，保存成功后直接从渠道编辑页切回一级卡片列表。
+- [x] 2026-02-20 20:11 +0800 回归覆盖与验证：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 在“QQ 渠道切到沙箱环境后保存配置会写入沙箱 api_base”用例新增保存后视图断言（`channels-level1-view` 可见、`channels-level2-view` 隐藏）；执行 `pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 20:09 +0800 聊天输入框再下移微调：`apps/web/src/styles.css` 将 `.composer` 内边距从 `24px 22px 22px` 调整为 `24px 22px 18px`，并将移动端 `.composer` 从 `18px 16px 16px` 调整为 `18px 16px 12px`，让输入区整体向下约 4px。
+- [x] 2026-02-20 20:09 +0800 本次验证：执行 `pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 20:08 +0800 配置区二级页“返回卡片”按钮右对齐：`apps/web/src/styles.css` 新增 `.settings-section-workspace .models-level-edit-head > [data-workspace-action="back"] { margin-left: auto; }`，将 workspace 配置文件/提示词二级页的返回按钮固定在头部右侧。
+- [x] 2026-02-20 20:08 +0800 本次验证：执行 `pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 20:06 +0800 QQ 渠道启用控件改为模型配置同款滑动开关：`apps/web/src/index.html` 将 `#qq-channel-enabled` 从“复选框 + 启用文案”改为 `provider-enabled-toggle-input` 的 `role="switch"` 结构；`apps/web/src/styles.css` 将该开关样式作用域从 `#models-provider-form` 扩展到 `#qq-channel-form`，保持两处视觉一致。
+- [x] 2026-02-20 20:06 +0800 本次验证：执行 `pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 20:05 +0800 设置区 `models/channels/workspace` 顶部高度统一：`apps/web/src/index.html` 将 `settings-section-channels` 标题改为与其他分组一致的 `panel-head` 结构；`apps/web/src/styles.css` 统一三处头部 `padding/min-height` 与标题字号，保证顶部区域等高显示。
+- [x] 2026-02-20 20:05 +0800 本次验证：执行 `pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 19:56 +0800 下拉框固定显示 3 项：`apps/web/src/styles.css` 将 `body.select-enhanced .options-list` 高度限制改为 `calc(38px * 3 + 8px)`，并为 `.option` 增加 `min-height: 38px`，其余选项通过纵向滚动查看；`apps/web/src/main.ts` 新增可见项高度常量并同步展开方向估算上限，避免方向判定与实际高度不一致。
+- [x] 2026-02-20 19:56 +0800 本次验证：执行 `pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 19:53 +0800 滚动槽位稳定性增强：`apps/web/src/styles.css` 在全局滚动条规则补充 `scrollbar-gutter: stable`，配合“固定宽度 + 透明显隐”策略，进一步减少滚动条状态切换造成的横向位移。
+- [x] 2026-02-20 19:53 +0800 本次验证：再次执行 `pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build`，均通过。
+- [x] 2026-02-20 19:53 +0800 会话身份与显示语言页样式对齐渠道配置编辑卡片：`apps/web/src/index.html` 将 `settings-section-panel="identity"` 与 `settings-section-panel="display"` 从 `controls` 结构改为 `stack-form + provider-basic-grid` 单列输入布局，实现“每行一个输入框/下拉框”。
+- [x] 2026-02-20 19:53 +0800 本次验证：执行 `pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build` 均通过。
+- [x] 2026-02-20 19:52 +0800 滚动条显隐改为“宽度常驻、颜色切换”，消除布局位移：`apps/web/src/styles.css` 将全局滚动条从“宽度 0/恢复宽度”改为“始终 `thin`/固定宽度”，空闲态使用透明轨道与滑块，滚动中仅切换颜色；`body.select-enhanced .options-list` 也改为固定紧凑宽度，避免下拉滚动时内容抖动。
+- [x] 2026-02-20 19:52 +0800 本次验证：执行 `pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build` 均通过。
+- [x] 2026-02-20 19:49 +0800 API 连接区样式对齐渠道配置编辑卡片：`apps/web/src/index.html` 将 `settings-section-panel="connection"` 从 `controls` 双列改为 `stack-form + provider-basic-grid` 单列输入布局，API Base / API Key 按“每行一个输入框”呈现，并保留右下角“刷新会话”按钮。
+- [x] 2026-02-20 19:49 +0800 本次验证：执行 `pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build` 均通过。
+- [x] 2026-02-20 19:49 +0800 搜索历史会话提示文案移除：`apps/web/src/index.html` 删除搜索弹窗 `search.hint` 提示行，不再显示“支持按关键词筛选会话。”。
+- [x] 2026-02-20 19:49 +0800 本次验证：`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 删除 `search.hint` 文案键；执行 `pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build` 均通过。
+- [x] 2026-02-20 19:48 +0800 全量滚动条改为“滚动中显示、静止隐藏”：`apps/web/src/styles.css` 将全局滚动条默认调整为隐藏（Firefox `scrollbar-width: none` + WebKit `0` 宽高），仅在 `.is-scrollbar-scrolling` 状态恢复主题滚动条；`body.select-enhanced .options-list` 同步改为滚动中显示紧凑滚动条；移除 `settings-panel` 的永久隐藏滚动条覆盖。
+- [x] 2026-02-20 19:48 +0800 本次验证与修复：`apps/web/src/main.ts` 新增全局滚动事件监听并按元素打点 `.is-scrollbar-scrolling`，同时将 `renderComposerTokenEstimate/estimateTokenCount` 提升到主作用域以修复 `tsc` 可见性报错；执行 `pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build` 均通过。
+- [x] 2026-02-20 19:46 +0800 配置区二级卡片页隐藏顶部标题与按钮：`apps/web/src/styles.css` 新增 `.settings-section-workspace.is-level2-active > .panel-head { display: none !important; }`，进入 `workspace` 二级页（配置文件/提示词）时不再显示顶部“配置文件”标题及右侧“导入 JSON/刷新”按钮，返回卡片页后恢复显示。
+- [x] 2026-02-20 19:46 +0800 本次验证：执行 `$env:NODE_OPTIONS='--max-old-space-size=4096'; pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build` 均通过。
+- [x] 2026-02-20 19:46 +0800 聊天输入区新增输入 token 估算并外置到左下：`apps/web/src/index.html` 在 `composer-main` 下方新增 `#composer-token-estimate`；`apps/web/src/main.ts` 新增 `estimateTokenCount()/renderComposerTokenEstimate()` 并绑定输入、附件插入、发送清空、语言切换等更新时机；`apps/web/src/styles.css` 新增 `composer-meta-row/composer-token-estimate` 样式，显示在输入框外左下角；`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增 `chat.tokensEstimate` 文案。
+- [x] 2026-02-20 19:46 +0800 本次验证：`apps/web/test/smoke/shell.test.ts` 新增 `#composer-token-estimate` DOM 断言；执行 `pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:59 +0800 Cron 画布新增全屏能力：`apps/web/src/index.html` 在 `cron-workflow-toolbar` 新增 `#cron-workflow-fullscreen-btn`；`apps/web/src/main.ts` 新增 Fullscreen API + 伪全屏兜底切换逻辑（含 `Escape` 先退出全屏、关闭创建弹窗自动退出全屏、语言切换同步按钮文案）；`apps/web/src/styles.css` 补充 `#cron-workflow-section:fullscreen/.is-pseudo-fullscreen` 布局与移动端样式。
+- [x] 2026-02-19 23:59 +0800 回归覆盖与验证：`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增 `cron.enterFullscreen/cron.exitFullscreen`；`apps/web/test/e2e/web-shell-tool-flow.test.ts` 增加全屏切换断言；`apps/web/test/smoke/shell.test.ts` 增加 `#cron-workflow-fullscreen-btn` DOM 断言；执行 `pnpm -C apps/web test`（37 tests）与 `pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:59 +0800 配置区二级页补充“返回卡片”入口：`apps/web/src/index.html` 在 `workspace-level2-config-view` 与 `workspace-level2-prompt-view` 头部新增 `data-workspace-action="back"` 按钮；`apps/web/src/main.ts` 复用 `setWorkspaceSettingsLevel("list")` 处理返回逻辑；`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增 `workspace.backToCards` 文案。
+- [x] 2026-02-19 23:59 +0800 本次验证：执行 `$env:NODE_OPTIONS='--max-old-space-size=4096'; pnpm -C apps/web test` 通过（37 tests）；执行 `pnpm -C apps/web build` 通过。
+- [x] 2026-02-19 23:55 +0800 搜索会话关键词匹配与布局调整：`apps/web/src/main.ts` 将搜索匹配字段收敛为会话名/Session ID/用户 ID/渠道/`cron_job_id`（新增 `resolveChatCronJobID`）；`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 精简搜索输入占位与提示文案，不再列字段清单；`apps/web/src/index.html` 同步更新搜索区后备提示；`apps/web/src/styles.css` 将 `.search-form` 改为全宽独占一栏；`apps/web/test/e2e/web-shell-tool-flow.test.ts` 增加 `job-demo`（`cron_job_id`）命中断言。
+- [x] 2026-02-19 23:55 +0800 本次验证：执行 `pnpm -C apps/web test` 首次因 Vitest worker OOM 失败；执行 `pnpm -C apps/web test -- --maxWorkers=1` 通过（37 tests）；执行 `$env:NODE_OPTIONS='--max-old-space-size=4096'; pnpm -C apps/web test` 通过（37 tests）；执行 `pnpm -C apps/web build` 通过。
+- [x] 2026-02-19 23:54 +0800 配置区改为“一级入口卡片 -> 二级详情”：`apps/web/src/index.html` 将 workspace 区改为 `workspace-level1-view` 两张入口卡片（配置文件/提示词）与二级列表视图（`workspace-level2-config-view`、`workspace-level2-prompt-view`）；`apps/web/src/main.ts` 新增 `WorkspaceSettingsLevel` 与入口卡片切页逻辑（`setWorkspaceSettingsLevel`、`renderWorkspaceNavigation`、`renderWorkspacePanel`）；`apps/web/src/styles.css` 补充 `workspace-entry-card` 与 workspace 二级卡片样式覆盖；`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增 `workspace.cardFileCount` 文案键。
+- [x] 2026-02-19 23:54 +0800 本次验证：执行 `$env:NODE_OPTIONS='--max-old-space-size=4096'; pnpm -C apps/web test` 通过（37 tests）；执行 `pnpm -C apps/web build` 通过。
+- [x] 2026-02-19 23:50 +0800 模型管理卡片新增供应商类型行：`apps/web/src/main.ts` 在 Provider 卡片 `API Key` 行下新增 `models.providerTypeLine` 渲染（基于 `resolveProviderType()` + `providerTypeDisplayName()`）；`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增中英文文案键；`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增卡片 meta 断言（包含 `openai Compatible`）。
+- [x] 2026-02-19 23:50 +0800 本次验证：执行 `pnpm -C apps/web build` 通过；执行 `pnpm -C apps/web test` 与 `pnpm -C apps/web test -- test/e2e/web-active-model-chat-flow.test.ts -t "auto activates model and sends chat without Echo fallback"` 失败，报错一致为 `missing_element: 缺少元素 #api-base`（见阻塞项）。
+- [x] 2026-02-19 23:48 +0800 会话卡片隐藏 Session ID：`apps/web/src/main.ts` 调整会话列表卡片 `chat.meta` 仅渲染更新时间；`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 将 `chat.meta` 文案改为仅显示“更新于/Updated at {{updatedAt}}”；`apps/web/test/e2e/web-shell-tool-flow.test.ts` 同步更新依赖会话卡片 session_id 的断言与删除用例测试数据。
+- [x] 2026-02-19 23:48 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:43 +0800 全局滚动条样式统一：`apps/web/src/styles.css` 新增全局 `scrollbar-width/scrollbar-color/::-webkit-scrollbar` 规则与主题变量（暖色轨道/圆角滑块/hover/active 态），并同步调整 `body.select-enhanced .options-list` 滚动条为同风格，修复设置面板右侧原生滚动条“突兀”问题。
+- [x] 2026-02-19 23:43 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:43 +0800 模型管理 Provider API Key 区交互调整：`apps/web/src/index.html` 移除 `#models-provider-test-btn`，并将 `#models-provider-api-key-input` 默认类型改为 `text`；`apps/web/src/main.ts` 删除测试按钮事件绑定，`providerAPIKeyVisible` 默认改为 `true`，并在表单重置/关闭/编辑回填时统一保持默认可见；`apps/web/src/styles.css` 清理 `provider-test-btn` 样式。
+- [x] 2026-02-19 23:43 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:42 +0800 配置区改为双卡片：`apps/web/src/index.html` 将 Workspace 列表改为“配置文件 / 提示词”两张卡片；`apps/web/src/main.ts` 新增 `workspace-prompts-body` 与文件分组渲染（提示词归类：`skills/*.json`、`docs/AI/*.md`、`prompts/`）；`apps/web/src/styles.css` 新增双卡片布局与交互样式；`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增卡片标题与空态文案键。
+- [x] 2026-02-19 23:42 +0800 本次验证：执行 `pnpm -C apps/web test` 通过；`pnpm -C apps/web build` 并行执行时因 Node OOM 失败，单独重跑 `pnpm -C apps/web build` 通过。
+- [x] 2026-02-19 23:41 +0800 渠道页左上标题补齐：`apps/web/src/index.html` 在 `settings-section-channels` 顶部新增与其他分组一致的标题 `渠道配置`（`data-i18n="control.settingsSectionChannelsTitle"`）；`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 同步补齐文案键。
+- [x] 2026-02-19 23:41 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:39 +0800 聊天输入框整体下移微调：`apps/web/src/styles.css` 将 `.composer` 内边距从 `22px` 调整为 `24px 22px 22px`，并将移动端 `.composer` 从 `16px` 调整为 `18px 16px 16px`，让输入区整体向下移动约 2px。
+- [x] 2026-02-19 23:39 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:35 +0800 提供商启用改为滑动开关：`apps/web/src/index.html` 将 `#models-provider-enabled-input` 从“checkbox+启用文案”改为 switch 结构；`apps/web/src/styles.css` 新增 `#models-provider-form .provider-enabled-toggle-input` 样式（轨道/滑块/选中态/焦点态），并限定仅作用于提供商编辑表单。
+- [x] 2026-02-19 23:35 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:34 +0800 模型管理 API Key 状态文案调整：`apps/web/src/locales/zh-CN.ts` 将 `models.apiKeyMasked` 从“已脱敏”改为“已隐藏”。
+- [x] 2026-02-19 23:34 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:33 +0800 OpenAI 供应商可多实例新增：`apps/web/src/main.ts` 调整 `resolveProviderIDForUpsert()`，创建 `openai` 类型时不再固定覆盖 `provider_id=openai`，改为自动生成唯一 ID（如 `openai-2/openai-3`）；并在创建重复 OpenAI 供应商且未填写别名时，自动注入默认模型别名（优先复用现有 `openai` 提供商模型，回退 `gpt-4o-mini/gpt-4.1-mini`），避免新增后模型列表为空。
+- [x] 2026-02-19 23:33 +0800 回归覆盖与验证：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增用例“adding openai provider keeps existing config and creates openai-2 with default aliases”；执行 `pnpm -C apps/web test -- test/e2e/web-active-model-chat-flow.test.ts -t "adding openai provider keeps existing config and creates openai-2 with default aliases"`、`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:33 +0800 搜索弹窗去外框：`apps/web/src/styles.css` 新增 `.search-modal-content > .subpanel` 覆盖，移除输入区与搜索结果区的虚线边框、底色、圆角与内边距，仅作用于搜索弹窗，不影响 Cron/Workspace 的 `subpanel`。
+- [x] 2026-02-19 23:33 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:31 +0800 聊天输入区模型渠道选择栏上移对齐：`apps/web/src/styles.css` 在 `.composer-toolbar .custom-select-container` 新增 `transform: translateY(-2px);`，将提供商/模型下拉视觉上移，与旁侧 `+` 按钮齐平。
+- [x] 2026-02-19 23:31 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:29 +0800 聊天命令下拉详情改为执行输出：`apps/web/src/main.ts` 将 shell 工具调用详情从 `tool_call` 输入参数切换为 `tool_result.summary`（先显示“等待执行输出”，收到结果后回填）；历史消息解析 `tool_call_notices` 时对 shell 工具不再展示原始 `command`，改为“暂无执行输出”；`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增命令输出状态文案；`apps/web/src/README.md` 更新说明。
+- [x] 2026-02-19 23:29 +0800 回归验证：更新 `apps/web/test/e2e/web-shell-tool-flow.test.ts` 断言 shell 下拉展示执行输出且不暴露 `command`；执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:25 +0800 Cron 启用开关外移：`apps/web/src/index.html` 删除创建/编辑表单内 `cron-enabled` 复选框；`apps/web/src/main.ts` 将任务列表“启用”列改为可切换 checkbox（`data-cron-toggle-enabled`），新增 `updateCronJobEnabled()` 通过 `PUT /cron/jobs/{job_id}` 更新 `enabled`，并让创建/编辑提交沿用任务现有启用状态（新建默认 `true`）；`apps/web/src/styles.css` 增加列表开关样式；`apps/web/test/e2e/web-shell-tool-flow.test.ts` 补充列表启用开关切换断言。
+- [x] 2026-02-19 23:25 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:24 +0800 Cron 画布连线删除能力补齐：`apps/web/src/cron-workflow.ts` 新增连线选中态与删除逻辑（支持点击选中后按 `Delete/Backspace` 删除、右键连线菜单删除），并补充连线与节点的选中状态切换和菜单模式。
+- [x] 2026-02-19 23:24 +0800 交互样式与回归：`apps/web/src/styles.css` 开启连线可交互并新增 hover/selected 样式；`apps/web/test/e2e/web-shell-tool-flow.test.ts` workflow 用例新增“删除连线后可重连并提交”断言，修复重连用例中的失效 DOM 句柄；执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:23 +0800 聊天输入区上拉下拉收起跳位修复：`apps/web/src/main.ts` 在 `closeCustomSelect/closeAllCustomSelects` 关闭时不再立即移除 `open-upward`，避免向上展开的菜单在淡出过程中重置到下方；`apps/web/src/styles.css` 将 `.options-list` 过渡从 `all` 收敛为 `opacity/transform/visibility`，避免 `top/bottom` 参与动画导致视觉跳动。
+- [x] 2026-02-19 23:23 +0800 本次验证：`pnpm -C apps/web test -- test/e2e/web-active-model-chat-flow.test.ts -t "opens composer toolbar select upward when lower space is clipped"`、`pnpm -C apps/web build` 通过；`pnpm -C apps/web test` 失败 1 项（见阻塞：`Cron 默认 workflow 模式可添加节点连线并提交` 超时）。
+- [x] 2026-02-19 23:17 +0800 聊天输入区 `+` 图标防压扁修复：`apps/web/src/index.html` 将 `#composer-attach-btn` 内的文本 `+` 改为等比例 SVG 十字；`apps/web/src/styles.css` 将 `.composer-mini-btn-icon` 在桌面/移动端都显式约束为正方形，并补充 SVG 尺寸，消除字体字形导致的视觉压扁。
+- [x] 2026-02-19 23:17 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:16 +0800 Cron 节点信息中文化：`apps/web/src/cron-workflow.ts` 节点类型标签、节点摘要、右键菜单、节点编辑器字段/提示、连线 aria-label 与节点操作错误提示改为 i18n 文案；`apps/web/src/main.ts` 将最近执行明细改为 `cron.executionSummary` 模板并对 `node_type/status` 映射到本地化文案；`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 补齐节点信息相关文案键；`apps/web/test/e2e/web-shell-tool-flow.test.ts` 更新执行明细断言。
+- [x] 2026-02-19 23:16 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:15 +0800 Provider 展示名精简：`apps/web/src/main.ts` 将 `formatProviderLabel()` 改为仅返回供应商名称（`display_name`，回退 `name/id`），不再拼接 `provider_id` 和 `compatible` 后缀；模型设置卡片与聊天输入区供应商下拉同步生效。
+- [x] 2026-02-19 23:15 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:12 +0800 Cron 工作流添加按钮改为右键空白处菜单：`apps/web/src/index.html` 删除 `cron-add-text-node/cron-add-if-node/cron-add-delay-node`；`apps/web/src/main.ts` 移除对应 DOM 绑定；`apps/web/src/cron-workflow.ts` 复用右键菜单并新增空白区 `Add Text/Add If/Add Delay` 动作，节点按右键位置落点；`apps/web/test/e2e/web-shell-tool-flow.test.ts` 与 `apps/web/test/smoke/shell.test.ts` 同步更新断言。
+- [x] 2026-02-19 23:12 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:08 +0800 聊天发送按钮继续上移：`apps/web/src/styles.css` 将 `.composer-send-btn` 的 `bottom` 从 `12px` 调整为 `14px`，右下角发送按钮再上移 2px。
+- [x] 2026-02-19 23:08 +0800 本次验证：执行 `pnpm -C apps/web test` 通过；执行 `pnpm -C apps/web build` 失败（`src/cron-workflow.ts` 多处 i18n key 类型错误，`TS2345`）。
+- [x] 2026-02-19 23:02 +0800 聊天发送按钮左上位移：`apps/web/src/styles.css` 将 `.composer-send-btn` 的定位由 `right: 6px; bottom: 8px;` 调整为 `right: 10px; bottom: 12px;`，使右下角发送按钮向左、向上移动。
+- [x] 2026-02-19 23:02 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:02 +0800 配置文件列表外框与说明文案精简：`apps/web/src/index.html` 删除“配置文件列表/读取 GET /workspace/files...”两行文案；`apps/web/src/styles.css` 将 `.settings-section-workspace .subpanel` 改为无边框、无底色、无阴影并去掉内边距，保留文件表格与操作按钮。
+- [x] 2026-02-19 23:02 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 23:00 +0800 聊天输入区 `+` 按钮独立右移：`apps/web/src/styles.css` 将 `#composer-attach-btn` 从 `margin-left` 调整为 `position: relative; left: 6px;`，仅按钮视觉右移，不再推动后续模型下拉整体右移。
+- [x] 2026-02-19 23:00 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 22:57 +0800 聊天输入区内边距再次加大：`apps/web/src/styles.css` 将 `.composer` `padding` 从 `18px`/`14px` 提升为 `22px`/`16px`；将 `.composer #message-input` 调整为 `padding: 18px 60px 50px 16px`；移动端同步提升 `min-height: 74px`、`padding-right: 56px`、`padding-bottom: 48px`，并将 `.composer-toolbar` 右侧对齐改为 `56px`。
+- [x] 2026-02-19 22:57 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 22:49 +0800 聊天输入区内边距加大：`apps/web/src/styles.css` 调整输入框底板与内容区留白，`.composer` `padding` 从 `14px`/`12px` 提升为 `18px`/`14px`，`.composer #message-input` 内边距增大为 `14px 56px 46px 12px`，并同步移动端 `min-height/padding-right/padding-bottom` 与 `.composer-toolbar` 对齐值，提升输入区视觉留白。
+- [x] 2026-02-19 22:49 +0800 本次验证：执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 21:55 +0800 Cron 画布节点编辑改为右键菜单：`apps/web/src/cron-workflow.ts` 新增节点 `contextmenu` 菜单（`Edit/Delete`），移除外置常驻编辑区交互，编辑改为画布内浮层；删除动作改为右键菜单触发；`apps/web/src/styles.css` 增加右键下拉菜单与浮层编辑器样式；`apps/web/src/index.html` 将 `#cron-workflow-node-editor` 默认设为隐藏并随脚本移动到画布视口内。
+- [x] 2026-02-19 21:55 +0800 回归测试与验证：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 更新 workflow 节点编辑链路为“右键卡片 -> Edit”，并断言菜单含可用 `Delete`；执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 21:54 +0800 聊天输入区左下角 `+` 按钮接入文件添加：`apps/web/src/index.html` 新增 `#composer-attach-btn/#composer-attach-input`；`apps/web/src/main.ts` 绑定点击选择并在选中文件/照片后将 `@文件名` 写入输入框，补充状态提示 `status.composerAttachmentsAdded`；`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 同步新增文案；`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增用例覆盖该交互。
+- [x] 2026-02-19 21:54 +0800 本次验证：`pnpm -C apps/web test -- test/e2e/web-active-model-chat-flow.test.ts -t "appends selected file names into composer when clicking the add button"`、`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 21:47 +0800 Cron 创建页重复标题修复：`apps/web/src/index.html` 删除 `#cron-create-form-title`，保留 `#cron-create-modal-title`，避免“创建画布任务”重复显示；`apps/web/src/main.ts` 同步移除对应 DOM 引用与重复标题赋值。
+- [x] 2026-02-19 21:47 +0800 本次验证：`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 21:44 +0800 消息发送按钮位置微调：`apps/web/src/styles.css` 将 `.composer-send-btn` 的 `bottom` 从 `6px` 调整为 `8px`，按钮整体上移 2px。
+- [x] 2026-02-19 21:44 +0800 本次验证：`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 21:00 +0800 Cron 任务画布新增 `if_event`：契约 `CronWorkflowNode.type` / `CronWorkflowNodeExecution.node_type` 增加 `if_event`，节点新增 `if_condition`；Gateway 增加条件表达式校验与执行（条件为假时提前结束并将后续节点标记 `skipped`）；Web 画布新增“添加 If 卡片”按钮、节点编辑器条件输入、保存校验与类型定义同步（`packages/contracts/openapi/openapi.yaml`、`tests/contract/openapi.lint.mjs`、`apps/gateway/internal/domain/models.go`、`apps/gateway/internal/app/server.go`、`apps/web/src/cron-workflow.ts`、`apps/web/src/main.ts`、`apps/web/src/index.html`、`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts`）。
+- [x] 2026-02-19 21:00 +0800 回归测试补充与验证：新增 Gateway 用例 `TestCreateCronWorkflowJobAcceptsIfEventNode` / `TestRunCronWorkflowStopsWhenIfConditionFalse`，更新 Web e2e/smoke 覆盖 if 节点创建提交（`apps/gateway/internal/app/server_test.go`、`apps/web/test/e2e/web-shell-tool-flow.test.ts`、`apps/web/test/smoke/shell.test.ts`）；执行 `pnpm --filter @nextai/tests-contract run lint`、`pnpm --filter @nextai/tests-contract run test`、`pnpm -C apps/web test`、`pnpm -C apps/web build`、`pnpm --dir packages/sdk-ts run lint`、`cd apps/gateway && go test ./internal/app -run "IfEvent|RunCronWorkflowStopsWhenIfConditionFalse|CreateCronWorkflowJobAcceptsIfEventNode" -count=1` 通过；`cd apps/gateway && go test ./...` 仍失败 1 项（既有阻塞 `TestProcessAgentViewOutOfBoundsFallsBackToEmptyFile`）。
+- [x] 2026-02-19 20:56 +0800 聊天发送按钮改为圆角正方形：`apps/web/src/styles.css` 将 `.composer-send-btn` 的 `border-radius` 从 `999px` 调整为 `10px`，与输入框右下角圆角更贴合。
+- [x] 2026-02-19 20:56 +0800 本次验证：`pnpm -C apps/web test` 通过；`pnpm -C apps/web build` 失败（`src/main.ts:4417`，`CronWorkflowSpec` 类型不兼容，`TS2322/TS2345`）。
+- [x] 2026-02-19 20:54 +0800 AI 消息去气泡框：`apps/web/src/styles.css` 调整 `.message.assistant`，移除背景/边框/圆角与内边距，并放宽宽度为 `max-width: 100%`，聊天区仅保留 AI 文本展示。
+- [x] 2026-02-19 20:54 +0800 本次验证：`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 18:31 +0800 QQ 渠道配置页头部精简：移除 `/config/channels/qq` 路径文案、`返回/刷新` 按钮及“读取并保存 `/config/channels/qq` 配置。”提示，仅保留配置表单；同步删除 `apps/web/src/main.ts` 中对应 DOM 引用、事件绑定和路径文案注入（`apps/web/src/index.html`、`apps/web/src/main.ts`）。
+- [x] 2026-02-19 18:31 +0800 本次验证：`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 18:16 +0800 渠道设置改为一级卡片入口：`apps/web/src/index.html`、`apps/web/src/main.ts` 将 channels 区改为“一级卡片列表 + 二级详情表单”，新增 QQ 渠道卡片（`#channels-entry-list`），点击后进入配置页（`#channels-level2-view`），并支持返回一级列表（`#qq-channel-back-btn`）；`apps/web/src/styles.css` 复用模型卡片样式并补齐 channels panel body 间距规则。
+- [x] 2026-02-19 18:16 +0800 回归测试与验证：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 更新 QQ 渠道用例为“先点渠道卡片再保存”；执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 18:13 +0800 设置页文件编辑关闭联动修复：`apps/web/src/main.ts` 调整设置弹窗外部点击与 `Escape` 关闭逻辑，工作区文件编辑/导入模态打开时不再触发设置弹窗关闭，修复“关闭文件编辑器时设置窗口一起关闭”。
+- [x] 2026-02-19 18:13 +0800 回归测试补充与验证：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 新增用例“keeps settings popover open when closing workspace editor modal”；执行 `pnpm -C apps/web test -- test/e2e/web-shell-tool-flow.test.ts`、`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 18:11 +0800 聊天请求失败回填修复：`apps/web/src/main.ts` 在 `sendMessage()` 异常分支新增 `fillAssistantErrorMessageIfPending()`，当 assistant 占位消息仍为空时，改为在消息气泡中直接写入错误文本，避免 API 配置错误/网关不可达时界面只显示 `...`。
+- [x] 2026-02-19 18:11 +0800 回归测试补充与验证：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增用例“shows request error in assistant bubble instead of ellipsis when request fails”；执行 `pnpm -C apps/web test -- test/e2e/web-active-model-chat-flow.test.ts -t "shows request error in assistant bubble instead of ellipsis when request fails"`、`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 18:05 +0800 聊天输入区模型选择器挤压修复：`apps/web/src/styles.css` 将 `.composer-toolbar` 从仅 `max-width` 改为左右锚定布局（新增 `right`，移除 `max-width`），修复绝对定位+wrap 导致 shrink-to-fit 收缩后“提供商/模型下拉被挤成两行”的问题；移动端媒体查询同步 `right: 50px` 与输入区内边距对齐。
+- [x] 2026-02-19 18:05 +0800 本次验证：`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 16:17 +0800 Provider 编辑自动保存：`apps/web/src/main.ts` 为 Provider 编辑表单新增防抖自动保存（仅编辑已存在提供商时启用，延迟 900ms，支持并发排队），输入 `model_aliases/timeout_ms/headers` 后无需手动点“保存提供商”也会提交；手动保存仍保留并优先。
+- [x] 2026-02-19 16:17 +0800 自动保存行为收敛：`upsertProvider(options)` 增加 `closeAfterSave/notifyStatus` 控制，自动保存走静默路径（不关闭编辑页、不刷成功提示），并在 `open/closeProviderModal` 清理自动保存定时器，避免残留触发。
+- [x] 2026-02-19 16:17 +0800 回归测试与验证：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增用例“auto saves provider edit changes without submitting form”；执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 15:25 +0800 Provider 保存语义修复：`apps/web/src/main.ts` 中 `upsertProvider()` 对 `timeout_ms/headers/model_aliases` 改为显式整表提交（空值也传），修复“清空后点击保存不生效”问题。
+- [x] 2026-02-19 15:25 +0800 回归测试补充与验证：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增用例“clears model_aliases timeout_ms and headers when provider form values are emptied”；执行 `pnpm -C apps/web test -- test/e2e/web-active-model-chat-flow.test.ts -t "clears model_aliases timeout_ms and headers when provider form values are emptied"`、`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 15:23 +0800 Cron 任务列表布局修复：`apps/web/src/styles.css` 为 `#cron-workbench[data-cron-view="jobs"]` 增加单列布局，消除编辑区隐藏后保留空白列导致的“任务列表缩到左侧”问题。
+- [x] 2026-02-19 15:23 +0800 本次验证：`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 15:02 +0800 Cron 任务界面改造：`#cron-create-open-btn` 点击后不再同屏分栏编辑，改为直接进入“创建/编辑”新界面（`#cron-workbench[data-cron-view="editor"]` 隐藏任务列表并全宽展示编辑区），关闭后返回任务列表；同步按钮文案为“创建任务 / Create Job”（`apps/web/src/index.html`、`apps/web/src/main.ts`、`apps/web/src/styles.css`、`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts`）。
+- [x] 2026-02-19 15:02 +0800 回归覆盖与验证：Web e2e 新增断言校验 cron 进入创建页后视图状态切换（`apps/web/test/e2e/web-shell-tool-flow.test.ts`）；执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 14:37 +0800 Cron 画布编排（线性工作流 v1）落地：完成 contracts + gateway + web 全链路改造；新增 `task_type=text|workflow`、`workflow/last_execution` 契约，Gateway 增加线性图校验与 workflow 执行/回写，Web 完成“任务列表+画布编辑区”、节点拖拽/连线/平移缩放、双模式切换与节点执行明细展示（`packages/contracts/openapi/openapi.yaml`、`apps/gateway/internal/domain/models.go`、`apps/gateway/internal/app/server.go`、`apps/web/src/cron-workflow.ts`、`apps/web/src/main.ts`、`apps/web/src/index.html`、`apps/web/src/styles.css`）。
+- [x] 2026-02-19 14:37 +0800 Cron 画布 i18n 与测试补齐：补充中英文 workflow 文案键；更新 e2e/smoke 覆盖“text/workflow 双模式、默认 workflow 创建、画布 payload、workflow 回显、节点执行明细、画布关键 DOM 节点”（`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts`、`apps/web/test/e2e/web-shell-tool-flow.test.ts`、`apps/web/test/smoke/shell.test.ts`）。
+- [x] 2026-02-19 14:37 +0800 既有 `search-chat-input` 缺失问题修复：修正 `apps/web/src/index.html` 搜索区损坏标签，恢复搜索输入 DOM 稳定性，`pnpm -C apps/web test` 全量通过。
+- [x] 2026-02-19 14:37 +0800 本次验收命令：`pnpm --filter @nextai/tests-contract run lint`、`pnpm --filter @nextai/tests-contract run test`、`pnpm --dir packages/sdk-ts run generate`、`pnpm --dir packages/sdk-ts run lint`、`go test ./internal/app -run "CronWorkflow|RunCronJobRoutesConsoleTextThroughAgent" -count=1`、`pnpm -C apps/web test`、`pnpm -C apps/web build` 通过；`cd apps/gateway && go test ./...` 仍失败 1 项（既有阻塞 `TestProcessAgentViewOutOfBoundsFallsBackToEmptyFile`，新增失败 0）。
+- [x] 2026-02-19 13:56 +0800 聊天输入区模型下拉可见性修复：`apps/web/src/main.ts` 在 `openCustomSelect()` 新增展开方向判定，基于触发器上下可用空间（含 `overflow` 裁剪祖先边界）自动切换 `open-upward`，并在关闭时清理方向状态，避免菜单被底部容器裁切后“看不到下拉栏”。
+- [x] 2026-02-19 13:56 +0800 下拉向上展开样式补齐：`apps/web/src/styles.css` 为 `body.select-enhanced .custom-select-container.open-upward .options-list` 增加 `bottom: calc(100% + 6px)`，确保工具条下拉可向上展开显示。
+- [x] 2026-02-19 13:56 +0800 回归测试补充与验证：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增用例“opens composer toolbar select upward when lower space is clipped”；执行 `pnpm -C apps/web test -- test/e2e/web-active-model-chat-flow.test.ts -t "opens composer toolbar select upward when lower space is clipped"`、`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 13:54 +0800 Provider 高级设置保存回填修复：契约 `ProviderInfo` 新增可选 `headers`、`timeout_ms`；Gateway `/models`、`/models/catalog`、`PUT /models/{provider_id}/config` 响应补齐这两个字段；Web 编辑页 `populateProviderForm()` 回填 `timeout_ms` 与 `headers`，避免“保存后重进丢失”（`packages/contracts/openapi/openapi.yaml`、`apps/gateway/internal/domain/models.go`、`apps/gateway/internal/app/server.go`、`apps/web/src/main.ts`）。
+- [x] 2026-02-19 13:54 +0800 回归测试补充：Gateway 用例 `TestConfigureProviderExposesModelAliasesInProviderInfo` 扩展校验 `headers/timeout_ms`；Web e2e 用例“reopens provider edit with custom models and aliases restored from model_aliases”扩展校验 `headers/timeout_ms` 重开回填（`apps/gateway/internal/app/server_test.go`、`apps/web/test/e2e/web-active-model-chat-flow.test.ts`）。
+- [x] 2026-02-19 13:54 +0800 本次验证：`pnpm --filter @nextai/tests-contract run test`、`pnpm --filter @nextai/tests-contract run lint`、`pnpm -C apps/web test`、`pnpm -C apps/web build`、`cd apps/gateway && go test ./internal/app -run TestConfigureProviderExposesModelAliasesInProviderInfo -count=1` 通过；`cd apps/gateway && go test ./...` 失败 1 项（既有阻塞 `TestProcessAgentViewOutOfBoundsFallsBackToEmptyFile`，断言旧文案）。
+- [x] 2026-02-19 13:46 +0800 聊天输入区左下角模型选择边框彻底移除：`apps/web/src/styles.css` 在 `.composer-toolbar .custom-select-container .select-trigger` 及其 `hover/open` 状态统一覆盖 `border: none`、`box-shadow: none`，避免被全局 `select-enhanced` 规则回写边框。
+- [x] 2026-02-19 13:46 +0800 本次验证：`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 13:42 +0800 下拉框样式全局统一：`apps/web/src/main.ts` 将自定义下拉增强范围从 `.controls select, .stack-form select` 扩展为全部 `select`，并在 `renderComposerModelSelectors`/`renderComposerModelOptions` 补充 `syncCustomSelect`，确保任意下拉都使用同一套样式且动态选项实时同步。
+- [x] 2026-02-19 13:42 +0800 聊天工具条下拉兼容全局样式：`apps/web/src/styles.css` 移除旧 `.composer-toolbar-select` 样式，改为 `.composer-toolbar .custom-select-container` 尺寸与交互约束（含移动端），保证工具条中的下拉也稳定使用统一样式。
+- [x] 2026-02-19 13:42 +0800 本次验证：`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 13:41 +0800 聊天消息展示区空态边框移除：`apps/web/src/styles.css` 为 `.message-empty-fill` 新增 `border: none;`，去掉输入框上方消息区域空态边框线。
+- [x] 2026-02-19 13:41 +0800 本次验证：`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 13:40 +0800 控制台设置页标题下虚线移除：`apps/web/src/styles.css` 将 `.settings-panel-head` 的下边框改为 `none`，并新增 `.settings-sections .panel-head { border-bottom: none; }`，统一去掉设置各分组标题下的虚线。
+- [x] 2026-02-19 13:40 +0800 本次验证：`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 13:37 +0800 左下角模型选择去边框：`apps/web/src/styles.css` 将 `.composer-toolbar-select` 的 `border` 改为 `none`，并移除 hover 态边框色变化。
+- [x] 2026-02-19 13:37 +0800 本次验证：`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 13:31 +0800 聊天输入区左下角“自定义”入口改为“提供商 + 模型”选择：`apps/web/src/index.html` 将 `composer-toolbar` 中的旧按钮替换为 `#composer-provider-select` 与 `#composer-model-select`；`apps/web/src/main.ts` 新增下拉渲染与切换逻辑，联动 `/models/active` 更新激活模型并同步状态；`apps/web/src/styles.css` 新增工具条下拉样式与移动端适配。
+- [x] 2026-02-19 13:31 +0800 回归覆盖与验证：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增用例“switches active model from composer toolbar provider and model selectors”；执行 `pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 13:25 +0800 聊天展示区去边框线：`apps/web/src/styles.css` 新增 `.chat.panel { border: none; }`，移除聊天展示面板外框线。
+- [x] 2026-02-19 13:25 +0800 本次验证：`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 13:24 +0800 聊天头部右上角搜索/定时按钮去底座：`apps/web/src/styles.css` 调整 `.chat-head-icon-btn` 为透明无边框无阴影，仅保留图标点击；同步将 `.chat-cron-toggle.is-active` 改为仅图标高亮色，不再显示背景底座。
+- [x] 2026-02-19 13:24 +0800 本次验证：`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 11:04 +0800 会话页可回跳修复：`apps/web/src/index.html` 在 cron 面板新增 `#cron-chat-toggle` 返回聊天按钮，`apps/web/src/main.ts` 绑定点击回到 `chat` tab，避免进入 cron 后丢失会话列表入口；同时修复 `index.html` 多处损坏闭合标签（`title/app.console/chat.toolbarCustomize/cron.status/workspace.transferHint/cron.intervalLabel/cron.submitCreate/search.inputLabel/search.hint`），防止 i18n 文本回填误删子节点导致会话与搜索区域元素异常。
+- [x] 2026-02-19 11:04 +0800 回归测试补充与验证：新增 Web e2e 用例“cron 面板可返回聊天页并恢复会话列表可见”（`apps/web/test/e2e/web-shell-tool-flow.test.ts`）；执行 `pnpm -C apps/web test -- test/e2e/web-shell-tool-flow.test.ts -t "cron 面板可返回聊天页并恢复会话列表可见"`、`pnpm -C apps/web test -- test/e2e/web-shell-tool-flow.test.ts -t "搜索页支持过滤会话并点击进入会话详情"`、`pnpm -C apps/web test`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-19 10:52 +0800 会话卡片可见性修复：`apps/web/src/styles.css` 将 `.chat-list-item` 从“默认 `opacity: 0` + 依赖动画 `forwards`”改为“默认可见（`opacity: 1`）”，并把 `@keyframes list-in` 补全 `from` 段，避免在动画不可用场景下会话卡片不显示。
+- [x] 2026-02-19 10:52 +0800 本次验证：`pnpm -C apps/web build` 通过；`pnpm -C apps/web test` 失败 1 项（`test/e2e/web-shell-tool-flow.test.ts` 用例“搜索页支持过滤会话并点击进入会话详情”，`search-chat-input` 为 `null`，与既有阻塞一致）。
+- [x] 2026-02-19 10:37 +0800 聊天顶部分类隐藏：`apps/web/src/styles.css` 将 `.tab-strip` 设为 `display: none`，页面不再显示“聊天/定时任务”分类条，保留原有 `data-tab` 结构与脚本兼容。
+- [x] 2026-02-19 10:37 +0800 本次验证：`pnpm -C apps/web build` 通过；`pnpm -C apps/web test` 失败 1 项（`test/e2e/web-shell-tool-flow.test.ts` 用例“搜索页支持过滤会话并点击进入会话详情”，`search-chat-input` 为 `null`，与既有阻塞一致）。
+- [x] 2026-02-19 10:28 +0800 顶部状态条改为仅控制台输出：`apps/web/src/styles.css` 将 `.panel-status` 设置为 `display: none`，页面不再显示“草稿会话已就绪/已加载 X 个定时任务”等全局状态条；`apps/web/src/main.ts` 的 `setStatus()` 继续写入 `#status-line`（兼容测试），并新增浏览器控制台输出 `[NextAI][status]`（error 用 `console.error`，其余用 `console.log`，包含 tone/message/at）。
+- [x] 2026-02-19 10:28 +0800 本次验证：`pnpm -C apps/web build` 通过；`pnpm -C apps/web test` 失败 1 项（`test/e2e/web-shell-tool-flow.test.ts` 用例“搜索页支持过滤会话并点击进入会话详情”，`search-chat-input` 为 `null`，与既有阻塞一致）。
+- [x] 2026-02-19 10:24 +0800 会话 ID 展示修复：`apps/web/src/styles.css` 调整 `.chat-head`/`.chat-head-actions` 与 `.session-badge` 布局，移除会话 ID 截断省略（`max-width: 42% + ellipsis`），改为可完整换行显示，并在窄屏下自动换到下一行避免被搜索/定时图标挤压；`apps/web/src/main.ts` 在 `renderChatHeader()` 同步设置 `chatSession.title` 为完整 session id。
+- [x] 2026-02-19 10:24 +0800 本次验证：`pnpm -C apps/web build` 通过；`pnpm -C apps/web test` 失败 1 项（`test/e2e/web-shell-tool-flow.test.ts` 用例“搜索页支持过滤会话并点击进入会话详情”，`search-chat-input` 为 `null`，与既有阻塞一致）。
+- [x] 2026-02-19 10:25 +0800 聊天输入框下状态行改为控制台输出：`apps/web/src/main.ts` 在 `applyLocaleToDocument()` 末尾新增 `logComposerStatusToConsole()`，统一输出 `chat.statusLocal` / `chat.statusFullAccess` 到浏览器控制台；`apps/web/src/styles.css` 将 `.composer-status-row` 设置为 `display: none`，页面不再显示该行。
+- [x] 2026-02-19 10:25 +0800 本次验证：`pnpm -C apps/web build` 通过；`pnpm -C apps/web test` 失败 1 项（`test/e2e/web-shell-tool-flow.test.ts` 用例“搜索页支持过滤会话并点击进入会话详情”，`search-chat-input` 为 `null`，与既有阻塞一致）。
+- [x] 2026-02-19 10:23 +0800 聊天头部定时任务入口改为查询同款拟态框：`apps/web/src/styles.css` 将 `.chat-head-icon-btn` 调整为带圆角边框、渐变底和双向阴影的拟态按钮，补充 hover/focus 阴影与 `chat-cron-toggle` 激活态边框/背景。
+- [x] 2026-02-19 10:23 +0800 本次验证：`pnpm -C apps/web build` 通过；`pnpm -C apps/web test` 失败 1 项（`test/e2e/web-shell-tool-flow.test.ts` 用例“搜索页支持过滤会话并点击进入会话详情”，`search-chat-input` 为 `null`，与既有阻塞一致）。
+- [x] 2026-02-19 10:14 +0800 Provider 模型回填修复：`ProviderInfo` 契约新增可选 `model_aliases`；Gateway `/models` 与 `/models/catalog` 返回该字段；Web 编辑页回填逻辑优先读取 `model_aliases` 并兼容从 `models` 推导（`packages/contracts/openapi/openapi.yaml`、`apps/gateway/internal/domain/models.go`、`apps/gateway/internal/app/server.go`、`apps/web/src/main.ts`）。
+- [x] 2026-02-19 10:14 +0800 回归测试补充：新增 Gateway 用例 `TestConfigureProviderExposesModelAliasesInProviderInfo`，新增 Web e2e 用例“reopens provider edit with custom models and aliases restored from model_aliases”（`apps/gateway/internal/app/server_test.go`、`apps/web/test/e2e/web-active-model-chat-flow.test.ts`）。
+- [x] 2026-02-19 10:14 +0800 本次验证：`pnpm --filter @nextai/tests-contract run test`、`pnpm --filter @nextai/tests-contract run lint`、`pnpm -C apps/web test -- test/e2e/web-active-model-chat-flow.test.ts`、`pnpm -C apps/web build`、`cd apps/gateway && go test ./internal/app -run TestConfigureProviderExposesModelAliasesInProviderInfo -count=1` 通过；`pnpm -C apps/web test` 失败 1 项（`test/e2e/web-shell-tool-flow.test.ts` 用例“搜索页支持过滤会话并点击进入会话详情”，`search-chat-input` 为 `null`，与既有阻塞一致）；`cd apps/gateway && go test ./...` 失败 1 项（`TestProcessAgentViewOutOfBoundsFallsBackToEmptyFile` 断言旧文案，和既有阻塞一致）。
+- [x] 2026-02-19 10:13 +0800 定时任务入口改为聊天头部图标：`apps/web/src/index.html` 新增 `#chat-cron-toggle` 并放在 `#chat-search-toggle` 左侧，顶部 `data-tab="cron"` 改为仅保留兼容的隐藏按钮；`apps/web/src/main.ts` 绑定图标点击切换 `cron` tab；`apps/web/src/styles.css` 新增 `tab-btn-ghost` 与 `chat-head-icon-btn`/`chat-cron-toggle.is-active` 样式。
+- [x] 2026-02-19 10:13 +0800 本次验证：`pnpm -C apps/web build` 通过；`pnpm -C apps/web test` 失败 1 项（`test/e2e/web-shell-tool-flow.test.ts` 用例“搜索页支持过滤会话并点击进入会话详情”，`search-chat-input` 为 `null`，与既有阻塞一致）。
+- [x] 2026-02-19 10:00 +0800 会话区搜索按钮样式调整：`apps/web/src/index.html` 将 `#chat-search-toggle` 移至 `#chat-session` 左侧；`apps/web/src/styles.css` 去除 `.chat-search-toggle` 的背景/边框/阴影，仅保留图标显示。
+- [x] 2026-02-19 10:00 +0800 本次验证：`pnpm -C apps/web build` 通过；`pnpm -C apps/web test` 失败 1 项（`test/e2e/web-shell-tool-flow.test.ts` 用例“搜索页支持过滤会话并点击进入会话详情”，`search-chat-input` 为 `null`，与既有阻塞一致）。
+- [x] 2026-02-19 09:52 +0800 接手阻塞解除：已补齐交接文件 `C:\Users\Lenovo\.codex\handoff\latest.md`，按顺序继续执行本次需求。
+- [x] 2026-02-19 09:52 +0800 控制台设置模型编辑调整：移除“Models”区右上角 `Manage/Add`，将“自定义模型配置（可选）”改为和 `model_aliases（可选）` 一样在卡片内添加行；同步清理 `main.ts` 中 `providerModelsManageOpen` 与相关逻辑，移除无引用样式（`apps/web/src/index.html`、`apps/web/src/main.ts`、`apps/web/src/styles.css`）。
+- [x] 2026-02-19 09:52 +0800 本次验证：`pnpm -C apps/web build` 通过；`pnpm -C apps/web test` 失败 1 项（`test/e2e/web-shell-tool-flow.test.ts` 用例“搜索页支持过滤会话并点击进入会话详情”，`search-chat-input` 为 `null`，与既有阻塞一致）。
+- [x] 2026-02-19 09:43 +0800 会话区输入框禁止手动拉伸：`apps/web/src/styles.css` 将 `.composer #message-input` 的 `resize` 从 `vertical` 调整为 `none`。
+- [x] 2026-02-19 09:43 +0800 本次验证：`pnpm -C apps/web build` 通过；`pnpm -C apps/web test` 失败 1 项（`test/e2e/web-shell-tool-flow.test.ts` 用例“搜索页支持过滤会话并点击进入会话详情”，`search-chat-input` 为 `null`，与既有阻塞一致）。
 - [x] 2026-02-19 09:39 +0800 工作区分批提交完成（1/3）：`72b0a78`，主题 `feat(gateway): protect default chat from deletion`，包含 Gateway 默认会话保护 + OpenAPI/contract 文档同步。
 - [x] 2026-02-19 09:39 +0800 工作区分批提交完成（2/3）：`7e3b239`，主题 `feat(web): refactor console settings and search interactions`，包含 Web 设置分组重构、搜索弹窗交互、样式与测试同步。
 - [x] 2026-02-19 09:39 +0800 本次验证：`pnpm --filter @nextai/tests-contract run test` 通过；`pnpm -C apps/web build` 通过；`pnpm -C apps/web test` 失败 1 项（见阻塞）；`cd apps/gateway && go test ./...` 失败 1 项（见阻塞）。
@@ -48,3 +273,4 @@
 - [x] 2026-02-18 20:29 +0800 默认会话保护落地：`chat-default` 强制保留，删除返回 `400 default_chat_protected`，契约与测试同步完成。
 - [x] 2026-02-18 19:01 +0800 Windows smoke 链路修复并通过：`pnpm -C tests/smoke test`、`pnpm -r test`、`pnpm -r build`。
 - [x] 2026-02-18 23:42 +0800 TODO 精简：移除冗余历史流水，保留接手必需信息与有效阻塞项。
+
