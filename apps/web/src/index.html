@@ -88,15 +88,6 @@
                   <button
                     type="button"
                     class="settings-nav-item"
-                    data-settings-section="identity"
-                    aria-selected="false"
-                    data-i18n="control.settingsSectionIdentity"
-                  >
-                    Identity
-                  </button>
-                  <button
-                    type="button"
-                    class="settings-nav-item"
                     data-settings-section="display"
                     aria-selected="false"
                     data-i18n="control.settingsSectionDisplay"
@@ -144,9 +135,8 @@
                             </label>
                             <label class="provider-basic-field provider-basic-toggle">
                               <span data-i18n="models.providerEnabled">Enable Provider</span>
-                              <span class="checkbox-inline provider-enabled-toggle">
-                                <input id="models-provider-enabled-input" type="checkbox" checked />
-                                <span data-i18n="common.enabled">Enabled</span>
+                              <span class="provider-enabled-toggle">
+                                <input id="models-provider-enabled-input" class="provider-enabled-toggle-input" type="checkbox" role="switch" checked />
                               </span>
                             </label>
                           </section>
@@ -275,59 +265,68 @@
                       </section>
                     </div>
                   </section>
-                  <section class="settings-section settings-section-channels" data-settings-section-panel="channels" hidden>
+                  <section id="settings-section-channels" class="settings-section settings-section-channels" data-settings-section-panel="channels" hidden>
                     <div class="panel-head">
-                      <h3 class="settings-section-title" data-i18n="workspace.qqChannelTitle">QQ Channel Config</h3>
-                      <button id="refresh-qq-channel" type="button" data-i18n="common.refresh">Refresh</button>
+                      <h3 class="settings-section-title" data-i18n="control.settingsSectionChannelsTitle">Channel Settings</h3>
                     </div>
-                    <p class="hint settings-section-hint" data-i18n="workspace.qqChannelHint">Load and save `/config/channels/qq` configuration.</p>
-                    <form id="qq-channel-form" class="stack-form">
-                      <section class="provider-basic-grid">
-                        <label class="provider-basic-field provider-basic-toggle">
-                          <span data-i18n="workspace.qqEnabled">Enable QQ channel</span>
-                          <span class="checkbox-inline provider-enabled-toggle">
-                            <input id="qq-channel-enabled" type="checkbox" />
-                            <span data-i18n="common.enabled">Enabled</span>
-                          </span>
-                        </label>
-                        <label class="provider-basic-field">
-                          <span data-i18n="workspace.qqAppID">QQ App ID</span>
-                          <input id="qq-channel-app-id" type="text" placeholder="app-xxx" />
-                        </label>
-                        <label class="provider-basic-field">
-                          <span data-i18n="workspace.qqClientSecret">QQ Client Secret</span>
-                          <input id="qq-channel-client-secret" type="password" placeholder="secret-xxx" />
-                        </label>
-                        <label class="provider-basic-field">
-                          <span data-i18n="workspace.qqBotPrefix">Bot Prefix</span>
-                          <input id="qq-channel-bot-prefix" type="text" placeholder="[BOT] " />
-                        </label>
-                        <label class="provider-basic-field">
-                          <span data-i18n="workspace.qqTargetType">Target Type</span>
-                          <select id="qq-channel-target-type">
-                            <option value="c2c">c2c</option>
-                            <option value="group">group</option>
-                            <option value="guild">guild</option>
-                          </select>
-                        </label>
-                        <label class="provider-basic-field">
-                          <span data-i18n="workspace.qqAPIEnvironment">API Env</span>
-                          <select id="qq-channel-api-env">
-                            <option value="production" data-i18n="workspace.qqAPIEnvironmentProduction">Production</option>
-                            <option value="sandbox" data-i18n="workspace.qqAPIEnvironmentSandbox">Sandbox</option>
-                          </select>
-                        </label>
-                        <label class="provider-basic-field">
-                          <span data-i18n="workspace.qqTimeoutSeconds">Timeout Seconds</span>
-                          <input id="qq-channel-timeout-seconds" type="number" min="1" step="1" placeholder="8" />
-                        </label>
+                    <div class="panel-body models-pages">
+                      <section id="channels-level1-view" class="models-level models-level-list">
+                        <ul id="channels-entry-list" class="detail-list models-provider-card-grid"></ul>
                       </section>
-                      <div class="actions-row">
-                        <button id="save-qq-channel" type="submit" data-i18n="workspace.qqSave">Save QQ Config</button>
-                      </div>
-                    </form>
+                      <section id="channels-level2-view" class="models-level models-level-edit" hidden>
+                        <div class="models-level-edit-head">
+                          <div class="models-level-edit-title-group">
+                            <h3 class="settings-section-title" data-i18n="workspace.qqChannelTitle">QQ Channel Config</h3>
+                          </div>
+                        </div>
+                        <form id="qq-channel-form" class="stack-form">
+                          <section class="provider-basic-grid">
+                            <label class="provider-basic-field provider-basic-toggle">
+                              <span data-i18n="workspace.qqEnabled">Enable QQ channel</span>
+                              <span class="provider-enabled-toggle">
+                                <input id="qq-channel-enabled" class="provider-enabled-toggle-input" type="checkbox" role="switch" />
+                              </span>
+                            </label>
+                            <label class="provider-basic-field">
+                              <span data-i18n="workspace.qqAppID">QQ App ID</span>
+                              <input id="qq-channel-app-id" type="text" placeholder="app-xxx" />
+                            </label>
+                            <label class="provider-basic-field">
+                              <span data-i18n="workspace.qqClientSecret">QQ Client Secret</span>
+                              <input id="qq-channel-client-secret" type="password" placeholder="secret-xxx" />
+                            </label>
+                            <label class="provider-basic-field">
+                              <span data-i18n="workspace.qqBotPrefix">Bot Prefix</span>
+                              <input id="qq-channel-bot-prefix" type="text" placeholder="[BOT] " />
+                            </label>
+                            <label class="provider-basic-field">
+                              <span data-i18n="workspace.qqTargetType">Target Type</span>
+                              <select id="qq-channel-target-type">
+                                <option value="c2c">c2c</option>
+                                <option value="group">group</option>
+                                <option value="guild">guild</option>
+                              </select>
+                            </label>
+                            <label class="provider-basic-field">
+                              <span data-i18n="workspace.qqAPIEnvironment">API Env</span>
+                              <select id="qq-channel-api-env">
+                                <option value="production" data-i18n="workspace.qqAPIEnvironmentProduction">Production</option>
+                                <option value="sandbox" data-i18n="workspace.qqAPIEnvironmentSandbox">Sandbox</option>
+                              </select>
+                            </label>
+                            <label class="provider-basic-field">
+                              <span data-i18n="workspace.qqTimeoutSeconds">Timeout Seconds</span>
+                              <input id="qq-channel-timeout-seconds" type="number" min="1" step="1" placeholder="8" />
+                            </label>
+                          </section>
+                          <div class="actions-row">
+                            <button id="save-qq-channel" type="submit" data-i18n="workspace.qqSave">Save QQ Config</button>
+                          </div>
+                        </form>
+                      </section>
+                    </div>
                   </section>
-                  <section class="settings-section settings-section-workspace" data-settings-section-panel="workspace" hidden>
+                  <section id="settings-section-workspace" class="settings-section settings-section-workspace" data-settings-section-panel="workspace" hidden>
                     <div class="panel-head">
                       <h3 class="settings-section-title" data-i18n="workspace.title">Config Files</h3>
                       <div class="actions-row panel-actions">
@@ -337,23 +336,23 @@
                         <button id="refresh-workspace" type="button" data-i18n="common.refresh">Refresh</button>
                       </div>
                     </div>
-                    <div class="panel-body stack-block">
-                      <section class="subpanel">
-                        <h3 data-i18n="workspace.files">Config Files</h3>
-                        <p class="hint" data-i18n="workspace.filesHint">Load `GET /workspace/files` and edit selected config file.</p>
-                        <div class="table-wrap">
-                          <table class="data-table">
-                            <thead>
-                              <tr>
-                                <th data-i18n="workspace.path">Path</th>
-                                <th data-i18n="workspace.summary">Summary</th>
-                                <th data-i18n="workspace.size">Size</th>
-                                <th data-i18n="workspace.action">Action</th>
-                              </tr>
-                            </thead>
-                            <tbody id="workspace-files-body"></tbody>
-                          </table>
+                    <div class="panel-body models-pages workspace-panel-body">
+                      <section id="workspace-level1-view" class="models-level models-level-list">
+                        <ul id="workspace-entry-list" class="detail-list models-provider-card-grid"></ul>
+                      </section>
+                      <section id="workspace-level2-config-view" class="models-level models-level-edit" hidden>
+                        <div class="models-level-edit-head">
+                          <div class="models-level-edit-title-group">
+                            <h3 class="settings-section-title" data-i18n="workspace.configCardTitle">Config Files</h3>
+                          </div>
+                          <button type="button" class="secondary-btn" data-workspace-action="back" data-i18n="workspace.backToCards">Back</button>
                         </div>
+                        <article class="subpanel workspace-file-card">
+                          <div class="workspace-file-card-head">
+                            <h4 class="workspace-file-card-title" data-i18n="workspace.files">Config Files</h4>
+                          </div>
+                          <ul id="workspace-files-body" class="detail-list models-provider-card-grid workspace-file-card-grid workspace-file-cards"></ul>
+                        </article>
                         <form id="workspace-create-file-form" class="stack-form">
                           <label>
                             <span data-i18n="workspace.newPath">New Config File Path</span>
@@ -362,56 +361,66 @@
                           <button id="workspace-create-file-btn" type="submit" data-i18n="workspace.createFile">Create Skill Config File</button>
                         </form>
                       </section>
+                      <section id="workspace-level2-prompt-view" class="models-level models-level-edit" hidden>
+                        <div class="models-level-edit-head">
+                          <div class="models-level-edit-title-group">
+                            <h3 class="settings-section-title" data-i18n="workspace.promptCardTitle">Prompt Files</h3>
+                          </div>
+                          <button type="button" class="secondary-btn" data-workspace-action="back" data-i18n="workspace.backToCards">Back</button>
+                        </div>
+                        <article class="subpanel workspace-file-card">
+                          <div class="workspace-file-card-head">
+                            <h4 class="workspace-file-card-title" data-i18n="workspace.promptCardTitle">Prompt Files</h4>
+                          </div>
+                          <ul id="workspace-prompts-body" class="detail-list models-provider-card-grid workspace-file-card-grid workspace-file-cards"></ul>
+                        </article>
+                      </section>
                     </div>
                   </section>
-                  <section class="settings-section" data-settings-section-panel="connection" hidden>
-                    <h3 class="settings-section-title" data-i18n="control.settingsSectionConnectionTitle">API Connection</h3>
+                  <section class="settings-section settings-section-connection" data-settings-section-panel="connection" hidden>
+                    <div class="models-level-edit-head">
+                      <div class="models-level-edit-title-group">
+                        <h3 class="settings-section-title" data-i18n="control.settingsSectionConnectionTitle">API Connection</h3>
+                      </div>
+                    </div>
                     <p class="hint settings-section-hint" data-i18n="control.settingsSectionConnectionDesc">
                       Configure gateway endpoint and API key used by chat requests.
                     </p>
-                    <div class="controls">
-                      <label>
-                        <span data-i18n="control.apiBase">API Base</span>
-                        <input id="api-base" type="url" placeholder="http://127.0.0.1:8088" />
-                      </label>
-                      <label>
-                        <span data-i18n="control.apiKey">API Key</span>
-                        <input id="api-key" type="password" placeholder="change-me" data-i18n-placeholder="control.apiKeyPlaceholder" />
-                      </label>
-                      <div class="settings-section-actions">
+                    <div class="stack-form">
+                      <section class="provider-basic-grid">
+                        <label class="provider-basic-field">
+                          <span data-i18n="control.apiBase">API Base</span>
+                          <input id="api-base" type="url" placeholder="http://127.0.0.1:8088" />
+                        </label>
+                        <label class="provider-basic-field">
+                          <span data-i18n="control.apiKey">API Key</span>
+                          <input id="api-key" type="password" placeholder="change-me" data-i18n-placeholder="control.apiKeyPlaceholder" />
+                        </label>
+                      </section>
+                      <div class="actions-row settings-section-actions">
                         <button id="reload-chats" type="button" data-i18n="control.reloadChats">Reload Chats</button>
                       </div>
                     </div>
                   </section>
-                  <section class="settings-section" data-settings-section-panel="identity" hidden>
-                    <h3 class="settings-section-title" data-i18n="control.settingsSectionIdentityTitle">Chat Identity</h3>
-                    <p class="hint settings-section-hint" data-i18n="control.settingsSectionIdentityDesc">
-                      Configure default user identifier and current channel.
-                    </p>
-                    <div class="controls">
-                      <label>
-                        <span data-i18n="control.userId">User ID</span>
-                        <input id="user-id" type="text" placeholder="demo-user" />
-                      </label>
-                      <label>
-                        <span data-i18n="control.channel">Channel</span>
-                        <input id="channel" type="text" placeholder="console" readonly />
-                      </label>
+                  <section class="settings-section settings-section-display" data-settings-section-panel="display" hidden>
+                    <div class="models-level-edit-head">
+                      <div class="models-level-edit-title-group">
+                        <h3 class="settings-section-title" data-i18n="control.settingsSectionDisplayTitle">Display & Language</h3>
+                      </div>
                     </div>
-                  </section>
-                  <section class="settings-section" data-settings-section-panel="display" hidden>
-                    <h3 class="settings-section-title" data-i18n="control.settingsSectionDisplayTitle">Display & Language</h3>
                     <p class="hint settings-section-hint" data-i18n="control.settingsSectionDisplayDesc">
                       Adjust locale and display preferences.
                     </p>
-                    <div class="controls">
-                      <label>
-                        <span data-i18n="control.locale">Language</span>
-                        <select id="locale-select">
-                          <option value="zh-CN" data-i18n="locale.zhCN">Chinese</option>
-                          <option value="en-US" data-i18n="locale.enUS">English</option>
-                        </select>
-                      </label>
+                    <div class="stack-form">
+                      <section class="provider-basic-grid">
+                        <label class="provider-basic-field">
+                          <span data-i18n="control.locale">Language</span>
+                          <select id="locale-select">
+                            <option value="zh-CN" data-i18n="locale.zhCN">Chinese</option>
+                            <option value="en-US" data-i18n="locale.enUS">English</option>
+                          </select>
+                        </label>
+                      </section>
                     </div>
                   </section>
                 </div>
@@ -445,10 +454,22 @@
               <div class="panel-head chat-head">
                 <h2 id="chat-title">鑽夌浼氳瘽</h2>
                 <div class="chat-head-actions">
-                  <span id="chat-session" class="session-badge"></span>
+                  <button
+                    id="chat-cron-toggle"
+                    class="chat-head-icon-btn chat-cron-toggle"
+                    type="button"
+                    aria-controls="panel-cron"
+                    aria-pressed="false"
+                    data-i18n-aria-label="cron.title"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <circle cx="12" cy="12" r="7"></circle>
+                      <path d="M12 8v4.5l3 2"></path>
+                    </svg>
+                  </button>
                   <button
                     id="chat-search-toggle"
-                    class="chat-search-toggle"
+                    class="chat-head-icon-btn chat-search-toggle"
                     type="button"
                     aria-controls="search-modal"
                     aria-expanded="false"
@@ -459,6 +480,7 @@
                       <path d="M16 16L21 21"></path>
                     </svg>
                   </button>
+                  <span id="chat-session" class="session-badge"></span>
                 </div>
               </div>
 
@@ -480,18 +502,24 @@
                       </svg>
                     </button>
                     <div class="composer-toolbar" role="toolbar" aria-label="chat composer tools">
-                      <button type="button" class="composer-mini-btn composer-mini-btn-icon" data-i18n-aria-label="chat.toolbarAdd">
-                        <span aria-hidden="true">+</span>
+                      <button
+                        id="composer-attach-btn"
+                        type="button"
+                        class="composer-mini-btn composer-mini-btn-icon"
+                        data-i18n-aria-label="chat.toolbarAdd"
+                      >
+                        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                          <path d="M10 5.5V14.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" />
+                          <path d="M5.5 10H14.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" />
+                        </svg>
                       </button>
-                      <button type="button" class="composer-mini-btn">
-                      <span data-i18n="chat.toolbarCustomize">自定义</span>
-                        <span class="composer-caret" aria-hidden="true"></span>
-                      </button>
-                      <button type="button" class="composer-mini-btn">
-                        <span data-i18n="chat.toolbarReasoningHigh">超高</span>
-                        <span class="composer-caret" aria-hidden="true"></span>
-                      </button>
+                      <input id="composer-attach-input" type="file" multiple hidden />
+                      <select id="composer-provider-select" class="composer-toolbar-select" data-i18n-aria-label="models.provider"></select>
+                      <select id="composer-model-select" class="composer-toolbar-select" data-i18n-aria-label="models.modelFromProvider"></select>
                     </div>
+                  </div>
+                  <div class="composer-meta-row" aria-live="polite">
+                    <span id="composer-token-estimate" class="composer-token-estimate">Tokens: 0</span>
                   </div>
                   <div class="composer-status-row">
                     <button type="button" class="composer-status-btn">
@@ -513,32 +541,99 @@
 
         <section id="panel-cron" class="tab-panel panel stack-panel">
           <div class="panel-head">
-            <h2 data-i18n="cron.title">定时任务</h2>
+            <h2 data-i18n="cron.title">Cron Jobs</h2>
             <div class="actions-row panel-actions">
+              <button id="cron-chat-toggle" class="secondary-btn" type="button" data-i18n="tab.chat">Chat</button>
               <button id="cron-create-open-btn" type="button" aria-controls="cron-create-modal" aria-expanded="false" data-i18n="cron.openCreateModal">
-                打开创建窗口
+                Create
               </button>
-              <button id="refresh-cron" type="button" data-i18n="common.refresh">刷新</button>
+              <button id="refresh-cron" type="button" data-i18n="common.refresh">Refresh</button>
             </div>
           </div>
-          <div class="panel-body stack-block">
-            <section class="subpanel">
-              <h3 data-i18n="cron.jobs">任务列表</h3>
-              <div class="table-wrap">
-                <table class="data-table">
-                  <thead>
-                    <tr>
-                      <th data-i18n="cron.id">ID</th>
-                      <th data-i18n="cron.name">名称</th>
-                      <th data-i18n="cron.enabled">启用</th>
-                      <th data-i18n="cron.nextRun">下次运行</th>
-                      <th data-i18n="cron.status">状态</th>
-                      <th data-i18n="cron.action">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody id="cron-jobs-body"></tbody>
-                </table>
+          <div id="cron-workbench" class="panel-body cron-workbench" data-cron-view="jobs">
+            <section id="cron-jobs-subpanel" class="subpanel cron-jobs-subpanel">
+              <h3 data-i18n="cron.jobs">Jobs</h3>
+              <ul id="cron-jobs-body" class="detail-list cron-job-card-grid"></ul>
+            </section>
+            <section id="cron-create-modal" class="subpanel cron-editor-panel is-hidden" aria-hidden="true">
+              <div class="cron-editor-head">
+                <h3 id="cron-create-modal-title" data-i18n="cron.createWorkflowJob">Create Workflow Job</h3>
+                <button id="cron-create-modal-close-btn" class="secondary-btn" type="button" data-i18n="common.close">Close</button>
               </div>
+              <p id="cron-dispatch-hint" class="hint"></p>
+              <form id="cron-create-form" class="stack-form cron-form-grid">
+                <label>
+                  <span data-i18n="cron.id">ID</span>
+                  <input id="cron-id" type="text" placeholder="job-demo" data-i18n-placeholder="cron.idPlaceholder" />
+                </label>
+                <label>
+                  <span data-i18n="cron.name">Name</span>
+                  <input id="cron-name" type="text" placeholder="demo task" data-i18n-placeholder="cron.namePlaceholder" />
+                </label>
+                <label>
+                  <span data-i18n="cron.taskType">Task Type</span>
+                  <select id="cron-task-type" data-select-search="off">
+                    <option value="workflow" data-i18n="cron.taskTypeWorkflow">workflow</option>
+                    <option value="text" data-i18n="cron.taskTypeText">text</option>
+                  </select>
+                </label>
+                <label>
+                  <span data-i18n="cron.intervalLabel">Schedule (schedule.cron)</span>
+                  <input id="cron-interval" type="text" placeholder="60s" value="60s" data-i18n-placeholder="cron.intervalPlaceholder" />
+                </label>
+                <label>
+                  <span data-i18n="cron.dispatchSession">dispatch.target.session_id</span>
+                  <input id="cron-session-id" type="text" />
+                </label>
+                <label>
+                  <span data-i18n="cron.maxConcurrency">runtime.max_concurrency</span>
+                  <input id="cron-max-concurrency" type="number" min="1" value="1" />
+                </label>
+                <label>
+                  <span data-i18n="cron.timeoutSeconds">runtime.timeout_seconds</span>
+                  <input id="cron-timeout-seconds" type="number" min="1" value="30" />
+                </label>
+                <label>
+                  <span data-i18n="cron.misfireGraceSeconds">runtime.misfire_grace_seconds</span>
+                  <input id="cron-misfire-grace" type="number" min="0" value="0" />
+                </label>
+                <section id="cron-text-section" class="full-row">
+                  <label class="full-row">
+                    <span data-i18n="cron.text">Text</span>
+                    <textarea id="cron-text" rows="4" placeholder="Scheduled message text" data-i18n-placeholder="cron.textPlaceholder"></textarea>
+                  </label>
+                </section>
+                <section id="cron-workflow-section" class="full-row stack-block">
+                  <div class="actions-row cron-workflow-toolbar">
+                    <button id="cron-reset-workflow" type="button" class="secondary-btn" data-i18n="cron.resetWorkflow">Reset Workflow</button>
+                    <button
+                      id="cron-workflow-fullscreen-btn"
+                      type="button"
+                      class="secondary-btn"
+                      data-i18n="cron.enterFullscreen"
+                      data-i18n-aria-label="cron.enterFullscreen"
+                    >
+                      Fullscreen
+                    </button>
+                    <span id="cron-workflow-zoom" class="hint mono">100%</span>
+                  </div>
+                  <div id="cron-workflow-viewport" class="cron-workflow-viewport" aria-label="workflow-canvas">
+                    <div id="cron-workflow-canvas" class="cron-workflow-canvas">
+                      <svg id="cron-workflow-edges" class="cron-workflow-edges" viewBox="0 0 3200 2000" preserveAspectRatio="xMinYMin meet"></svg>
+                      <div id="cron-workflow-nodes" class="cron-workflow-nodes"></div>
+                    </div>
+                  </div>
+                  <div id="cron-workflow-node-editor" class="cron-workflow-node-editor stack-form is-hidden" aria-hidden="true"></div>
+                </section>
+                <section class="full-row stack-block cron-execution-section">
+                  <h4 data-i18n="cron.lastExecution">Last Execution</h4>
+                  <ul id="cron-workflow-execution-list" class="detail-list"></ul>
+                </section>
+                <div class="full-row actions-row">
+                  <button id="cron-new-session" type="button" data-i18n="cron.newSession">Generate New Session ID</button>
+                  <button id="cron-submit-btn" type="submit" data-i18n="cron.submitCreate">Submit Create (POST /cron/jobs)</button>
+                </div>
+              </form>
             </section>
           </div>
         </section>
@@ -558,19 +653,18 @@
             <section class="subpanel">
               <form class="stack-form search-form" id="search-chat-form">
                 <label>
-                  <span data-i18n="search.inputLabel">鍏抽敭璇?/span>
+                  <span data-i18n="search.inputLabel">Keyword</span>
                   <input
                     id="search-chat-input"
                     type="search"
-                    placeholder="杈撳叆浼氳瘽鍚嶃€丼ession ID銆佺敤鎴?ID銆佹笭閬撴垨瀹氭椂浠诲姟 ID"
+                    placeholder="Search chats by keyword"
                     data-i18n-placeholder="search.inputPlaceholder"
                   />
                 </label>
               </form>
-              <p class="hint" data-i18n="search.hint">鎸変細璇濆悕銆丼ession ID銆佺敤鎴?ID銆佹笭閬撱€佸畾鏃朵换鍔?ID锛坈ron_job_id锛夎繘琛屽尮閰嶃€?/p>
             </section>
             <section class="subpanel">
-              <h3 data-i18n="search.results">鎼滅储缁撴灉</h3>
+              <h3 data-i18n="search.results">Search Results</h3>
               <ul id="search-chat-results" class="search-result-list detail-list"></ul>
             </section>
           </div>
@@ -625,66 +719,6 @@
             </label>
             <button id="workspace-import-btn" type="submit" data-i18n="workspace.importJSON">导入 JSON</button>
           </form>
-        </section>
-      </div>
-
-      <div id="cron-create-modal" class="modal-shell is-hidden" aria-hidden="true">
-        <div class="modal-backdrop" data-cron-create-close="true"></div>
-        <section class="workspace-editor-modal-panel cron-create-modal-panel" role="dialog" aria-modal="true" aria-labelledby="cron-create-modal-title">
-          <div class="workspace-editor-modal-head">
-            <h2 id="cron-create-modal-title" data-i18n="cron.createTextJob">创建间隔文本任务</h2>
-            <button id="cron-create-modal-close-btn" class="secondary-btn" type="button" data-cron-create-close="true" data-i18n="common.close">
-              关闭
-            </button>
-          </div>
-          <div class="workspace-editor-modal-content workspace-neumorph">
-            <section class="workspace-neumorph-block">
-              <h3 id="cron-create-form-title" data-i18n="cron.createTextJob">创建间隔文本任务</h3>
-              <p id="cron-dispatch-hint" class="hint"></p>
-              <form id="cron-create-form" class="stack-form cron-form-grid">
-                <label>
-                  <span data-i18n="cron.id">ID</span>
-                  <input id="cron-id" type="text" placeholder="job-demo" data-i18n-placeholder="cron.idPlaceholder" />
-                </label>
-                <label>
-                  <span data-i18n="cron.name">名称</span>
-                  <input id="cron-name" type="text" placeholder="示例任务" data-i18n-placeholder="cron.namePlaceholder" />
-                </label>
-                <label>
-                  <span data-i18n="cron.intervalLabel">调度间隔（schedule.cron）</span>
-                  <input id="cron-interval" type="text" placeholder="60s" value="60s" data-i18n-placeholder="cron.intervalPlaceholder" />
-                </label>
-                <label>
-                  <span data-i18n="cron.dispatchSession">dispatch.target.session_id</span>
-                  <input id="cron-session-id" type="text" />
-                </label>
-                <label>
-                  <span data-i18n="cron.maxConcurrency">runtime.max_concurrency</span>
-                  <input id="cron-max-concurrency" type="number" min="1" value="1" />
-                </label>
-                <label>
-                  <span data-i18n="cron.timeoutSeconds">runtime.timeout_seconds</span>
-                  <input id="cron-timeout-seconds" type="number" min="1" value="30" />
-                </label>
-                <label>
-                  <span data-i18n="cron.misfireGraceSeconds">runtime.misfire_grace_seconds</span>
-                  <input id="cron-misfire-grace" type="number" min="0" value="0" />
-                </label>
-                <label class="checkbox-inline">
-                  <input id="cron-enabled" type="checkbox" checked />
-                  <span data-i18n="cron.enabledSwitch">启用</span>
-                </label>
-                <label class="full-row">
-                  <span data-i18n="cron.text">文本</span>
-                  <textarea id="cron-text" rows="4" placeholder="定时消息文本" data-i18n-placeholder="cron.textPlaceholder"></textarea>
-                </label>
-                <div class="full-row actions-row">
-                  <button id="cron-new-session" type="button" data-i18n="cron.newSession">生成新会话 ID</button>
-                  <button id="cron-submit-btn" type="submit" data-i18n="cron.submitCreate">提交创建（POST /cron/jobs）</button>
-                </div>
-              </form>
-            </section>
-          </div>
         </section>
       </div>
 
